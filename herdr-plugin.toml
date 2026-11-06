@@ -1,0 +1,48 @@
+id = "pparitoshh.hive"
+name = "Herdr Hive"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "One brain and N workers per workspace, each in its own git worktree, talking over AgentRadio, with a review bench."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/setup.sh"]
+
+[[startup]]
+command = ["sh", "scripts/startup.sh"]
+
+[[actions]]
+id = "new"
+title = "Hive: new workspace"
+contexts = ["workspace"]
+command = ["bin/hive", "new"]
+
+[[actions]]
+id = "close"
+title = "Hive: close"
+contexts = ["workspace"]
+command = ["bin/hive", "close"]
+
+[[actions]]
+id = "bench"
+title = "Hive: open review bench"
+contexts = ["workspace"]
+command = ["bin/hive", "bench", "--open"]
+
+[[events]]
+on = "workspace.created"
+command = ["bin/hive", "hook", "workspace-created"]
+
+[[panes]]
+id = "picker"
+title = "Hive picker"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["bin/hive", "picker"]
+
+[[panes]]
+id = "bench"
+title = "Review bench"
+placement = "tab"
+command = ["bin/hive", "bench"]

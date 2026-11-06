@@ -1,0 +1,13 @@
+#!/bin/sh
+# Entry point. Uses the plugin venv when it exists (Textual), else python3.
+# Resolve symlinks so ~/.local/bin/hive finds the plugin root.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+STATE="${HIVE_STATE_DIR:-$HOME/.local/state/herdr-hive}"
+PY=python3
+if [ -n "$STATE" ] && [ -x "$STATE/venv/bin/python" ]; then PY="$STATE/venv/bin/python"; fi
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m hive.cli "$@"
