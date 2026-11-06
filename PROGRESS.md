@@ -12,7 +12,7 @@ Status on 2026-11-06.
 | M3 | Report, `hive merge`, cleanup, conflict | Code done, not tested live | `merge_no_ff` with abort is covered by unit tests. |
 | M4 | Bench: dropdown, diff, comment, approve/reject | Code done, unit tests | The Textual pilot tests check that a comment goes to the worker and to the brain, and that a verdict goes to the brain. |
 | M5 | `hive ask`, `hive finish`, auto-open hook | Code done, not tested live | — |
-| M6 | AI review key, README, topic, v0.1.0 tag | Partly done | AI review key and README are done. The GitHub topic and the tag are not done. |
+| M6 | AI review key, README, topic, v0.1.0 tag | Done | The GitHub topic `herdr-plugin` is set. The tag `v0.1.0` is pushed. The repo is private, so the marketplace does not list it. |
 
 Unit tests: 24 pass (`PYTHONPATH=. ~/.local/state/herdr-hive/venv/bin/python -m unittest discover -s tests`).
 
@@ -27,5 +27,5 @@ Unit tests: 24 pass (`PYTHONPATH=. ~/.local/state/herdr-hive/venv/bin/python -m 
 
 1. Finish the live tests for M2 and M3: the worker cap, the conflict, the rebase and the merge.
 2. Live test of M5: `hive ask`, `hive finish` with push or PR, and the `workspace.created` hook.
-3. M6: add the GitHub topic `herdr-plugin` and tag `v0.1.0`.
+3. Make the repo public, so that the herdr marketplace lists the plugin.
 4. Spec Q2: check popups in the herdr desktop app.
