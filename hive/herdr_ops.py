@@ -135,13 +135,23 @@ def wait_shell(pane: str, timeout: float = 15) -> None:
         time.sleep(0.3)
 
 
-def wait_agent_ready(pane: str, timeout_ms: int = 90000) -> bool:
-    """Wait until herdr detects an agent in the pane and it settles idle."""
+def wait_agent_ready(pane: str, timeout_ms: int = 90000, blocked_timeout_ms: int = 1800000) -> bool:
+    """Wait until herdr detects an agent in the pane and it settles idle.
+
+    A startup dialog (folder trust, login) makes the agent `blocked`. Only the
+    human can answer it, so hive sends a toast and waits up to blocked_timeout_ms.
+    """
     end = time.time() + timeout_ms / 1000
+    told = False
     while time.time() < end:
         p = pane_get(pane) or {}
-        if p.get("agent") and p.get("agent_status") in ("idle", "done"):
+        st = p.get("agent_status")
+        if p.get("agent") and st in ("idle", "done"):
             return True
+        if st == "blocked" and not told:
+            told = True
+            toast("Hive: agent needs you", f"Answer the dialog in pane {p.get('label') or pane}")
+            end = max(end, time.time() + blocked_timeout_ms / 1000)
         time.sleep(1)
     return False
 
@@ -157,6 +167,15 @@ def toast(title: str, body: str = "", sound: str = "request") -> None:
     call(*args, check=False)
 
 
+def _first_pane(workspace: str | None) -> str | None:
+    try:
+        panes = pane_list(workspace)
+    except HerdrError:
+        return None
+    panes.sort(key=lambda p: not p.get("focused"))
+    return panes[0]["pane_id"] if panes else None
+
+
 # --- popups -----------------------------------------------------------------
 
 def popup_ask(req: dict, workspace: str | None = None, timeout: float = 1800) -> dict:
@@ -170,21 +189,24 @@ def popup_ask(req: dict, workspace: str | None = None, timeout: float = 1800) ->
     req_path.write_text(json.dumps(req))
     env = ["--env", f"HIVE_PICKER_REQ={req_path}", "--env", f"HIVE_PICKER_OUT={out_path}"]
     base = ["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "picker"]
-    if workspace:
-        base += ["--workspace", workspace]
     opened = False
+    last = ""
     for attempt in range(20):
         try:
             call(*base, "--placement", "popup", *env)
             opened = True
             break
         except HerdrError as e:
+            last = str(e)
             if "ui_busy" in str(e) or "busy" in str(e).lower():
                 time.sleep(3)  # another popup is open; queue behind it
                 continue
             break
     if not opened:
-        call(*base, "--placement", "split", "--focus", *env)
+        target = os.environ.get("HERDR_PANE_ID") or _first_pane(workspace)
+        if not target:
+            raise HerdrError(f"popup did not open ({last}) and no pane to split")
+        call(*base, "--placement", "split", "--target-pane", target, "--focus", *env)
     toast(req.get("title", "Hive"), req.get("prompt", ""))
     end = time.time() + timeout
     while time.time() < end:

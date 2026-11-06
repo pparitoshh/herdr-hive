@@ -189,6 +189,12 @@ def open_bench(name, ws, wt):
     try:
         H.call("plugin", "pane", "open", "--plugin", H.PLUGIN_ID, "--entrypoint", "bench",
                "--placement", "tab", "--workspace", ws, "--cwd", wt, "--env", f"HIVE_NAME={name}")
+        for _ in range(20):
+            bench = [p for p in H.pane_list(ws) if (p.get("label") or "").startswith("Review bench")]
+            if bench:
+                H.tab_rename(bench[0]["tab_id"], "review")
+                break
+            time.sleep(0.3)
     except H.HerdrError as e:
         print(f"hive: bench tab did not open: {e}", file=sys.stderr)
 
