@@ -40,17 +40,17 @@ headless_args = ["run"]
 [tiers.fast]
 harness = "opencode"
 model   = "opencode-go/qwen3.8-flash"
-description = "Short and simple edits: one or two files, a clear change, no design"
+description = "Small mechanical edit: one or two files, obvious and low risk, no tests needed. Examples: fix a typo, delete an unused import, rename in one file, change one message."
 
 [tiers.regular]
 harness = "claude"
 model   = "claude-haiku-5-5"
-description = "Normal coding work: a clear feature or bug fix, several files, tests"
+description = "Normal feature or bug fix: a few files and tests, clear goal, regular patterns. Examples: add a CLI flag end to end, fix an off-by-one with a regression test."
 
 [tiers.think]
 harness = "opencode"
 model   = "opencode-go/glm-5.3-flash"
-description = "Long or hard work: design, debugging, many files, unclear goal"
+description = "Hard or unclear work: design, unclear bugs, concurrency, performance, many-file refactor. Examples: fix a flaky test with no local repro, design a plugin API, find a memory leak."
 
 [routing]
 mode = "auto"            # auto | ask | fixed
@@ -109,11 +109,11 @@ class Tier:
 # Built-in tiers. An old global harnesses.toml has no [tiers], so `load` fills them in.
 TIERS = {
     "fast": Tier("fast", "opencode", "opencode-go/qwen3.8-flash",
-                 "Short and simple edits: one or two files, a clear change, no design"),
+                 "Small mechanical edit: one or two files, obvious and low risk, no tests needed. Examples: fix a typo, delete an unused import, rename in one file, change one message."),
     "regular": Tier("regular", "claude", "claude-haiku-5-5",
-                    "Normal coding work: a clear feature or bug fix, several files, tests"),
+                    "Normal feature or bug fix: a few files and tests, clear goal, regular patterns. Examples: add a CLI flag end to end, fix an off-by-one with a regression test."),
     "think": Tier("think", "opencode", "opencode-go/glm-5.3-flash",
-                  "Long or hard work: design, debugging, many files, unclear goal"),
+                  "Hard or unclear work: design, unclear bugs, concurrency, performance, many-file refactor. Examples: fix a flaky test with no local repro, design a plugin API, find a memory leak."),
 }
 
 
