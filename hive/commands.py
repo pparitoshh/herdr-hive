@@ -589,6 +589,27 @@ def register(sub) -> None:
     s = sub.add_parser("hook", help="internal"); s.add_argument("event"); s.set_defaults(func=cmd_hook)
     s = sub.add_parser("reconcile", help="mark orphans failed"); s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_reconcile)
+    register_router(sub)
+
+
+def register_router(sub, name="router") -> None:
+    """`hive router` subcommands (routing step 1)."""
+    from . import router
+    s = sub.add_parser(name, help="local decision-model router (setup | serve | ask | ping)")
+    rs = s.add_subparsers(dest="router_cmd", required=True)
+    c = rs.add_parser("setup", help="install router deps and download the model files (one time)")
+    c.add_argument("--dest", default=None, dest="dest")
+    c.set_defaults(func=router.cmd_router_setup)
+    c = rs.add_parser("serve", help="serve the router on a local Unix socket")
+    c.set_defaults(func=router.cmd_router_serve)
+    c = rs.add_parser("ask", help="ask the router to pick a tier for a task file")
+    c.add_argument("--task-file", required=True)
+    c.add_argument("--title", default=None)
+    c.add_argument("--timeout", default="2")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=router.cmd_router_ask)
+    c = rs.add_parser("ping", help="check that the router server answers")
+    c.set_defaults(func=router.cmd_router_ping)
 
 
 def argparse_remainder():

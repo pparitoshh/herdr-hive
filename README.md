@@ -137,6 +137,40 @@ The envelope format and the busy-hold idea come from AgentRadio (detailles/Agent
 PYTHONPATH=. ~/.local/state/herdr-hive/venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Router (routing step 1)
+
+`hive router` picks the worker tier with a local decision model. No HTTP
+endpoint and no network at run time.
+
+```bash
+hive router setup            # install deps, download the model files (one time)
+hive router serve            # server on the Unix socket (~/.local/state/herdr-hive/router.sock)
+hive router ask --task-file F --title T   # print the tier probabilities for a task file
+hive router ping             # check the server
+```
+
+No `pyproject.toml` exists here, so the optional deps list replaces the extra
+`hive[router]`:
+
+| Dependency | Installed by | Used for |
+|---|---|---|
+| `onnxruntime` | `hive router setup` (into the plug venv) | The ONNX session |
+| `tokenizers` | `hive router setup` | Token ids and spans |
+| `numpy` | `hive router setup` | Masks and softmax |
+
+Model files land in `~/.cache/herdr-hive/decision-model/`
+(`model_fp16.onnx`, `tokenizer.json`, `decision_config.json`, `VERIFY.json`,
+from `gparitosh007/Open-Decision-Model-150M-ONNX`). The download shows progress
+and skips existing files. `$HIVE_DECISION_MODEL_DIR` moves the cache.
+`$HIVE_ROUTER_MODEL_FILE` overrides the file pick.
+
+Measured on this machine (one server process, `intra_op_num_threads = 2`):
+model load about 3 s, p50 138 ms, p95 152 ms for one 3-option question over
+the Unix socket, server RSS about 620 MB. The fp32 copy measured slower and
+heavier (p50 162 ms, RSS 942 MB); int8 quantization does not load for this
+graph. When the deps or files are missing, the server does not start and the
+call fails with a reason (step 2 adds the human takeover).
+
 ## License
 
 MIT
