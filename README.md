@@ -7,7 +7,23 @@ A [herdr](https://herdr.dev) plugin that runs one **brain** and N **workers** in
 - All agents talk over a local message bus that stores messages in SQLite and delivers them into pane prompts.
 - A **review bench** tab shows each worker's diff and the whole-workspace diff to the human.
 
-The design is in [SPEC.md](SPEC.md).
+The design is in [SPEC.md](SPEC.md). The status of each part is in [PROGRESS.md](PROGRESS.md).
+
+## Features
+
+| Feature | What it does | Status |
+|---|---|---|
+| Hive | `hive new` opens a branch, a worktree, a brain pane and a review tab. | Tested live |
+| Workers | `hive spawn` starts a worker in its own worktree and branch. A limit (`max_workers`) applies. | Tested live |
+| Message bus | Local SQLite bus. It holds a message while the target is busy and delivers it when the target is idle. | Tested live |
+| Merge, fix, discard | `hive merge wN`, `hive fix wN`, `hive discard wN`. | Merge tested live |
+| Review bench | A Textual tab with the diff of each worker, comments and approve/reject. | Unit tests |
+| Ask and finish | `hive ask` popup for the human. `hive finish` pushes, or pushes and opens a PR. | Unit tests |
+| Worker tiers | fast, regular and think. Each tier has a harness and a model. | Tested live |
+| Router | A local decision model (ONNX, no network) picks the tier. The human picks when confidence is low or the router is down. | Tested live |
+| `--tier` flag and fixed mode | Skip the router for one spawn, or for all spawns (`routing.mode = "fixed"`). | Tested live |
+| Retrain log | Records each route and its outcome. `hive router export` writes labeled cases. | Tested live |
+| Worker permissions | Each worker launch allows the `hive` bus commands and the hive worktree. No user config is changed. | Unit tests, live test open |
 
 ## Requirements
 
@@ -115,6 +131,27 @@ Extra keys:
 | `defaults.allowed_harnesses` | all | Per-repo allow list |
 | `harness.<x>.headless_args` | — | Arguments for the AI review run, for example `["-p"]` for claude |
 | `harness.<x>.models_command` | — | A command that prints one model on each line, for example `["opencode", "models"]`. The model picker lists these after `models`. If the command fails, the picker shows only `models`. |
+
+| `workers.pretrust` | `false` | Reserved for a later fix that pre-trusts a worker folder. Not used yet. |
+
+Environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `HIVE_STATE_DIR` | The folder for `hive.db`, the router socket and the retrain log |
+| `HIVE_ASK_MODE=plain` | Ask in the terminal with numbered choices, not in a Textual popup. Use it for scripts and tests. |
+| `HIVE_SAVE_CASES=0` | Turn off the retrain log |
+
+## Worker permissions
+
+`hive spawn` gives each worker the permissions for one launch only. It does not write to `~/.claude.json` or to the OpenCode config.
+
+| Harness | What hive passes | What it allows |
+|---|---|---|
+| Claude Code | `--settings <worktree>/.tmp/hive-perms.json` and `--add-dir <hive worktree>` | `hive msg`, `hive inbox`, `hive show`, and access to the hive worktree |
+| OpenCode | The `OPENCODE_PERMISSION` environment variable | The same commands, and `external_directory` access to the hive worktree. Other bash commands still ask. |
+
+Claude Code shows a folder trust dialog in each new worktree. Hive does not answer it. Hive sends a toast and tells the brain which pane waits on the dialog.
 
 List the files to copy into each new worktree in `<repo>/.worktreeinclude` (gitignore syntax).
 

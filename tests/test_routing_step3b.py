@@ -56,7 +56,7 @@ class BaseSpawnTest(unittest.TestCase):
         (self.repo / "task.txt").write_text("Fix the login bug. One file only.")
         self.conn = state.connect(state.STATE_DIR / "hive.db")
         self.hid = state.add_hive(self.conn, name="t", repo=str(self.repo), branch="b",
-                                  worktree=str(_d() / "wt"), workspace_id="ws", brain_pane="bp",
+                                  worktree=str(self.repo), workspace_id="ws", brain_pane="bp",
                                   status="open")
         self.out = io.StringIO()
         self.capture = {}
@@ -164,6 +164,17 @@ class LowConfidenceTest(BaseSpawnTest):
         self.assertIn("low confidence", case["reason"])
         self.assertEqual(set(case["options"]), {"fast", "regular", "think"})
         self.assertTrue(case["state"].startswith("task. Fix the login bug"))
+
+    def test_human_case_logs_real_confidence_and_3_decimal_reason(self):
+        """The log carries the router's real confidence (the top prob), not
+        the 0.0 of the human route, and the reason shows 3 decimals."""
+        picker = Picker("think")
+        with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW)):
+            rc = self.spawn()
+        self.assertEqual(rc, 0)
+        case = routelog.cases()[0]
+        self.assertEqual(case["confidence"], max(PROBS_LOW.values()))  # 0.34, not 0.0
+        self.assertEqual(case["reason"], "low confidence 0.340 < 0.400")
         self.assertEqual(case["state_features"]["task_chars"], len("Fix the login bug. One file only."))
 
     def test_cancel_stops_spawn(self):
@@ -179,6 +190,17 @@ class LowConfidenceTest(BaseSpawnTest):
         with self._patch_io():
             with self.assertRaises(SystemExit):
                 self.spawn(tier="bogus")
+
+    def test_task_file_outside_worktrees_fails_before_anything(self):
+        """A late ref check left a stray pane and a worker stuck in spawning;
+        now spawn refuses before the route, the worktree and the pane."""
+        outside = _d() / "elsewhere.md"
+        outside.write_text("x")
+        with self._patch_io(router_fake=fake_ask_server(self.capture, PROBS_AUTO)):
+            with self.assertRaises(SystemExit):
+                self.spawn(task_file=str(outside))
+        self.assertEqual(state.workers(self.conn, self.hid), [])
+        self.assertEqual(self.event_kinds(), [])
 
 
 class RouterDownTest(BaseSpawnTest):
