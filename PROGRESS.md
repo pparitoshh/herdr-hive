@@ -1,6 +1,6 @@
 # Progress
 
-Status on 2026-11-07.
+Status on 2026-11-07 (end of day).
 
 ## Milestones
 
@@ -34,6 +34,26 @@ Unit tests (`PYTHONPATH=. python3 -m unittest discover -s tests`): 45 tests, 43 
 4. The bench tab label was a number. Hive now renames it to `review`.
 5. The model picker showed only the static `models` list. A harness can now set `models_command` (for example `opencode models`). The picker adds each output line after the static list.
 6. `hive merge` did not delete the worker branch. `git branch -d` checks against `main` in the primary checkout, not against the hive branch. Hive now checks that the branch is in the hive branch, then deletes it with `-D`.
+
+## Worker tiers and routing (plan: `.hive/tasks/ROUTING_PLAN.md`)
+
+| Step | Deliverable | Status | Evidence |
+|---|---|---|---|
+| 1-3b, 5 | Tiers fast/regular/think, local decision model router, human picker, retrain log, docs | Done | Merged in `worker-routing`. Router p50 138 ms (idle box), RSS 653 MB. |
+| J | `routing.mode = "fixed"` | Done | Merged (a00ebba). |
+| K | Live end-to-end test (7 tests) | Done | bfc3ad8: plain picker mode, early task-file check, log confidence fix. 100 tests passed. |
+| L | Worker permissions for each launch | Done, live test open | b0d5d82, merged 5c891c7. Claude: `--settings` (allow only `hive msg/inbox/show`) and `--add-dir`. OpenCode: `OPENCODE_PERMISSION`. Trust dialog notice to the brain. 112 tests pass. |
+| M | Short live test of Task L | Stopped (laptop closed) | Partial. Task file: `.hive/tasks/worker-perms-live-test.md`. |
+
+`main` has the merge of a00ebba (dd7d2aa). `main` does not have Task K and Task L yet.
+
+## Next (2026-11-08)
+
+1. Run Task M again with a Haiku brain. Check: trust notice, `hive msg` with no dialog, OpenCode with no `external_directory` dialog, the exact `hive msg` command form.
+2. If Task M passes, merge `origin/worker-routing-v2` into `main`.
+3. Fix: the trust dialog also shows on the hive brain. Task L covers only workers.
+4. Decide on `workers.pretrust` (writes `~/.claude.json`, needs the user).
+5. Router: all confidences were near 0.40, and the simple task got regular, not fast. Collect cases in the retrain log, then tune.
 
 ## Open work
 
