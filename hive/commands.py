@@ -431,11 +431,47 @@ def cmd_bench(args):
 
 # --- hooks / reconcile ---------------------------------------------------------------
 
-def cmd_hook(args):
-    if args.event != "workspace-created":
-        return 0
-    cfg = config.load()
-    if not cfg.auto_open:
+def _hook_bus(event: str) -> None:
+    """Flush on agent idle / focus change. Runs on every pane event, so it
+    stays fast: no DB open without a reason, and it never raises."""
+    try:
+        from . import bus
+        if not (state.STATE_DIR / "hive.db").exists():
+            return
+        ev = {}
+        try:
+            ev = json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON") or "{}")
+        except json.JSONDecodeError:
+            pass
+        status = find_key(ev, "agent_status") if event == "agent-status" else None
+        if event == "agent-status":  # only an idle agent can take a prompt
+            if status not in ("idle", "done"):
+                return
+            pane = find_key(ev, "pane_id")
+            if not pane:
+                return
+        else:
+            pane = None
+        conn = state.connect()
+        try:
+            if event == "agent-status":
+                row = conn.execute(
+                    "SELECT 1 FROM messages WHERE status='pending' AND target IN"
+                    " (SELECT name FROM handles WHERE pane_id=?) LIMIT 1", (pane,)).fetchone()
+            else:
+                row = conn.execute("SELECT 1 FROM messages WHERE status='pending' LIMIT 1").fetchone()
+            if not row:
+                return
+            bus.flush(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"hive: hook: {e}", file=sys.stderr)
+
+
+def _auto_open_new_hive():
+    """The workspace-created hook body: offer a hive for a plain git workspace."""
+    if not config.load().auto_open:
         return 0
     ev = {}
     try:
@@ -468,6 +504,15 @@ def cmd_hook(args):
     if ans != "Open hive":
         return 0
     return open_hive(top, ws, close_ws=ws)
+
+
+def cmd_hook(args):
+    if args.event == "workspace-created":
+        return _auto_open_new_hive()
+    if args.event in ("agent-status", "pane-focused"):
+        _hook_bus(args.event)
+        return 0
+    return 0
 
 
 def cmd_reconcile(args):
