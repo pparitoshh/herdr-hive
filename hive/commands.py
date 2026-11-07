@@ -381,16 +381,21 @@ def cmd_fix(args):
            ref=str(Path(args.task_file).resolve()) if args.task_file else None, workspace=hive["workspace_id"])
     state.update(conn, "workers", w["id"], status="fixing")
     state.event(conn, hive["id"], "fix", {"n": w["n"]}, w["id"])
-    _route_outcome(w["id"], "fix")
+    _route_outcome(w["id"], "fix", hive=hive)
     print(f"fix sent to w{w['n']}")
     return 0
 
 
-def _route_outcome(worker_id: int, outcome: str) -> None:
-    """Append the retrain outcome line; never blocks the command."""
+def _route_outcome(worker_id: int, outcome: str, hive=None) -> None:
+    """Append the retrain outcome line (only when routing.save_cases is on).
+    Never blocks the command."""
     try:
         from . import routelog
-        routelog.log_outcome(worker_id, outcome)
+        if hive is not None:
+            cfg = config.load(Path(hive["repo"]))
+            routelog.log_outcome(worker_id, outcome, cfg)
+        else:
+            routelog.log_outcome(worker_id, outcome)  # the caller decides with env/config
     except OSError as e:
         print(f"hive: route log error: {e}", file=sys.stderr)
 
@@ -446,7 +451,7 @@ def cmd_merge(args):
         return 5
     remove_worker(conn, hive, w, "merged", force_branch=False, merged_into=hive["branch"])
     state.event(conn, hive["id"], "merge", {"n": w["n"]}, w["id"])
-    _route_outcome(w["id"], "merge")
+    _route_outcome(w["id"], "merge", hive=hive)
     print(f"merged w{w['n']} into {hive['branch']}; pane, worktree and branch removed")
     return 0
 
@@ -463,7 +468,7 @@ def cmd_discard(args):
             return 1
     remove_worker(conn, hive, w, "discarded", force_branch=True)
     state.event(conn, hive["id"], "discard", {"n": w["n"]}, w["id"])
-    _route_outcome(w["id"], "discard")
+    _route_outcome(w["id"], "discard", hive=hive)
     print(f"discarded w{w['n']}")
     return 0
 

@@ -1,5 +1,11 @@
 """Retrain log for routing cases (routing step 3b, task items 4 and 5).
 
+The log is OFF by default (user request, task item 6): `routing.save_cases`
+is false, and `$HIVE_SAVE_CASES=1` turns it on. When it is off, `log_case`
+and `log_outcome` write nothing and create no `route_log/` directory.
+`hive router export` still reads old files and writes 0 rows when there are
+none.
+
 One case line per spawn that the router did not decide:
 
     {"ts", "worker_id", "repo", "title", "task_text" (first 2000 chars),
@@ -31,10 +37,22 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import time
 from pathlib import Path
 
 from . import state
+
+
+def save_enabled(cfg=None) -> bool:
+    """Is the retrain log on? $HIVE_SAVE_CASES wins over the config file."""
+    env = os.environ.get("HIVE_SAVE_CASES")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if cfg is None:
+        from . import config
+        cfg = config.load()
+    return bool(getattr(cfg.routing, "save_cases", False))
 
 
 def log_dir() -> Path:
@@ -68,8 +86,9 @@ def should_log(route, min_confidence: float) -> bool:
 def log_case(hive, worker_id: int, title: str, task_text: str, request: dict,
              route, cfg, reason: str, state_features: dict, human_pick: str | None,
              now: float | None = None) -> Path | None:
-    """Append one case line when the route needs logging. Returns the path."""
-    if not should_log(route, cfg.routing.min_confidence):
+    """Append one case line when logging is on and the route needs it.
+    Returns the path, or None when the log is off or not needed."""
+    if not save_enabled(cfg) or not should_log(route, cfg.routing.min_confidence):
         return None
     now = now if now is not None else time.time()
     q = request["questions"][0]
@@ -98,8 +117,11 @@ def log_case(hive, worker_id: int, title: str, task_text: str, request: dict,
     return _append(row, now)
 
 
-def log_outcome(worker_id: int, outcome: str, now: float | None = None) -> Path:
-    """Append an outcome line after merge, discard or fix."""
+def log_outcome(worker_id: int, outcome: str, cfg=None, now: float | None = None) -> Path | None:
+    """Append an outcome line after merge, discard or fix. Returns None when
+    the retrain log is off."""
+    if not save_enabled(cfg):
+        return None
     now = now if now is not None else time.time()
     return _append({"type": "outcome", "worker_id": worker_id, "ts": now,
                     "outcome": outcome}, now)

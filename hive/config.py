@@ -57,6 +57,7 @@ mode = "auto"            # auto | ask | fixed
 min_confidence = 0.5     # below this, the human picks the tier
 idle_exit = "30m"        # the router server exits after this idle time
 timeout_s = 2            # max wait for one router request
+save_cases = false       # write the retrain log (route_log/); off by default
 
 [review]
 harnesses = ["claude", "opencode"]
@@ -123,6 +124,7 @@ class Routing:
     min_confidence: float = 0.5
     idle_exit: int = 1800
     timeout_s: int = 2
+    save_cases: bool = False  # retrain log off by default ($HIVE_SAVE_CASES=1 forces it on)
 
 
 @dataclass
@@ -211,8 +213,14 @@ def load(repo: Path | None = None, path: Path | None = None) -> Config:
             cfg.tiers[name] = t
     r = data.get("routing", {})
     idle = r.get("idle_exit", 1800)
-    cfg.routing = Routing(mode=str(r.get("mode", "auto")),
-                          min_confidence=float(r.get("min_confidence", 0.5)),
-                          idle_exit=parse_duration(idle) if isinstance(idle, str) else int(idle),
-                          timeout_s=int(r.get("timeout_s", 2)))
+    routing = Routing(mode=str(r.get("mode", "auto")),
+                      min_confidence=float(r.get("min_confidence", 0.5)),
+                      idle_exit=parse_duration(idle) if isinstance(idle, str) else int(idle),
+                      timeout_s=int(r.get("timeout_s", 2)),
+                      save_cases=bool(r.get("save_cases", False)))
+    # $HIVE_SAVE_CASES=1 turns the retrain log on even when the config is off.
+    env = os.environ.get("HIVE_SAVE_CASES")
+    if env is not None:
+        routing.save_cases = env.strip().lower() in ("1", "true", "yes", "on")
+    cfg.routing = routing
     return cfg

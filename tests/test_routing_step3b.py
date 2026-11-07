@@ -67,8 +67,11 @@ class BaseSpawnTest(unittest.TestCase):
         config.GLOBAL_PATH = self.saved_global
         routelog.log_dir()
 
-    def _patch_io(self, picker=None, router_fake=None):
-        """Patch git, herdr splits, the agent launcher and the router client."""
+    def _patch_io(self, picker=None, router_fake=None, save_cases: str | None = "1"):
+        """Patch git, herdr splits, the agent launcher and the router client.
+
+        `save_cases` sets the env for the retrain-log gate: "1" on, "0" or ""
+        off, None leaves the environment untouched."""
         from hive import git_ops
         patches = [mock.patch.object(git_ops, "worktree_add"),
                    mock.patch.object(git_ops, "copy_worktreeinclude"),
@@ -79,6 +82,8 @@ class BaseSpawnTest(unittest.TestCase):
                    mock.patch.object(commands.H, "split", return_value="pane-x"),
                    mock.patch.object(commands.bus, "send", return_value="m1"),
                    mock.patch.object(commands, "launch_agent")]
+        if save_cases is not None:
+            patches.append(mock.patch.dict(os.environ, {"HIVE_SAVE_CASES": save_cases}))
         if router_fake is not None:
             patches.append(mock.patch.object(router, "ask_server", router_fake))
         if picker is not None:
@@ -211,6 +216,54 @@ class FlagTest(BaseSpawnTest):
         self.assertEqual(routelog.cases(), [])
 
 
+class SaveCasesOffTest(BaseSpawnTest):
+    """The retrain log is OFF by default (user request, task item 6)."""
+
+    def test_default_writes_nothing_and_makes_no_dir(self):
+        picker = Picker("think")
+        with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
+                            save_cases="0"):
+            rc = self.spawn()
+        self.assertEqual(rc, 0)
+        w = self.worker()
+        self.assertEqual(json.loads(w["route_json"])["decided_by"], "human")
+        self.assertFalse((state.STATE_DIR / "route_log").exists())  # no dir, no files
+        commands._route_outcome(w["id"], "merge")  # outcome lines are off as well
+        self.assertFalse((state.STATE_DIR / "route_log").exists())
+
+    def test_env_override_turns_it_on(self):
+        picker = Picker("think")
+        with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
+                            save_cases="1"):
+            rc = self.spawn()
+            commands._route_outcome(self.worker()["id"], "merge")  # env still on inside
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(routelog.cases()), 1)
+        self.assertEqual(routelog.outcomes(), {self.worker()["id"]: "merge"})
+
+    def test_config_save_cases_true_turns_it_on(self):
+        # the env is unset, so the config decides
+        (self.repo / ".hive.toml").write_text('[routing]\nsave_cases = true\n')
+        picker = Picker("think")
+        with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
+                            save_cases=None):
+            rc = self.spawn()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(routelog.cases()), 1)
+        commands._route_outcome(self.worker()["id"], "merge", hive={  # hive["repo"] has the toml
+            "repo": str(self.repo)})
+        self.assertEqual(routelog.outcomes(), {self.worker()["id"]: "merge"})
+        self.assertEqual(config.load(self.repo, path=self.config_path).routing.save_cases, True)
+
+    def test_export_prints_zero_rows_when_off(self):
+        out = _d() / "train2.jsonl"
+        with self._patch_io(save_cases="0"):
+            path, rows = routelog.export(out=out)
+        self.assertEqual(rows, 0)
+        self.assertEqual(out.read_text(), "")
+        self.assertEqual(path, out)
+
+
 class OutcomeTest(BaseSpawnTest):
     """The retrain log outcome lines (simpler schema: append, do not rewrite)."""
 
@@ -223,14 +276,16 @@ class OutcomeTest(BaseSpawnTest):
                       confidence=0.1 if human_pick else 0.0, decided_by="human")
         request = router.task_question("Fix the login bug.", title="t", file_count=3,
                                        criteria=router.tier_criteria(cfg))
-        return routelog.log_case({"repo": str(self.repo)}, wid, "t", "Fix the login bug.",
-                                 request, route, cfg, reason="human picked with router probabilities",
-                                 state_features={"title": "t", "file_count": 3}, human_pick=human_pick,
-                                 now=1731000000.0)
+        with mock.patch.dict(os.environ, {"HIVE_SAVE_CASES": "1"}):  # the default is off
+            return routelog.log_case({"repo": str(self.repo)}, wid, "t", "Fix the login bug.",
+                                     request, route, cfg, reason="human picked with router probabilities",
+                                     state_features={"title": "t", "file_count": 3}, human_pick=human_pick,
+                                     now=1731000000.0)
 
     def test_fix_marks_outcome(self):
-        self._case(1, human_pick="regular")
-        commands._route_outcome(1, "fix")
+        self._case(1, human_pick="regular")  # _case saves with HIVE_SAVE_CASES=1
+        with mock.patch.dict(os.environ, {"HIVE_SAVE_CASES": "1"}):
+            commands._route_outcome(1, "fix")
         self.assertEqual(routelog.outcomes(), {1: "fix"})
 
     def test_export_label_rules(self):
@@ -250,7 +305,8 @@ class OutcomeTest(BaseSpawnTest):
                                 "probs": {}, "router_pick": None, "confidence": 0.0,
                                 "reason": "r", "human_pick": None, "final_tier": "regular",
                                 "outcome": None}) + "\n")
-        routelog.log_outcome(3, "merge", now=1731000001.0)
+        with mock.patch.dict(os.environ, {"HIVE_SAVE_CASES": "1"}):
+            routelog.log_outcome(3, "merge", now=1731000001.0)
         out = _d() / "train.jsonl"
         path, rows = routelog.export(out=out)
         data = [json.loads(line) for line in out.read_text().splitlines()]
