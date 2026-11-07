@@ -335,8 +335,14 @@ def get_model():
 
 # --- task -> decision input (plan section "Router", point 1) --------------------------------------
 
-def task_question(task_text: str, title: str | None = None, file_count: int = 0):
-    """Build the /v1/decide request for tier routing."""
+def task_question(task_text: str, title: str | None = None, file_count: int = 0,
+                  criteria: list[tuple[str, str]] | None = None):
+    """Build the /v1/decide request for tier routing.
+
+    `criteria` is the option list (label, description). The callers pass the
+    tier descriptions from config (task item 2); the built-in TIER_OPTIONS is
+    only the fallback.
+    """
     state_text = (title or "").strip()
     if state_text:
         state_text += ". "
@@ -347,8 +353,13 @@ def task_question(task_text: str, title: str | None = None, file_count: int = 0)
         "state": state_text,
         "preferences": {"cost": "low cost before speed"},
         "questions": [{"id": "tier", "type": "choice", "instructions": TIER_QUESTION,
-                       "criteria": {label: desc for label, desc in TIER_OPTIONS}}],
+                       "criteria": {label: desc for label, desc in (criteria or TIER_OPTIONS)}}],
     }
+
+
+def tier_criteria(cfg) -> list[tuple[str, str]]:
+    """Option list from the config tiers (label = tier name)."""
+    return [(t.name, t.description) for t in cfg.tiers.values()]
 
 
 # --- server ---------------------------------------------------------------------------------------
@@ -479,9 +490,16 @@ def repo_file_count() -> int:
 
 
 def cmd_router_ask(args):
-    """`hive router ask --task-file F`: print the tier probabilities."""
+    """`hive router ask --task-file F`: print the tier probabilities.
+
+    Tier descriptions come from config (global toml merged with .hive.toml in
+    the cwd), so the human tunes routing only there (task item 2).
+    """
     task_text = Path(args.task_file).read_text(errors="replace") if args.task_file else ""
-    request = task_question(task_text, title=args.title, file_count=repo_file_count())
+    from . import config
+    cfg = config.load(repo=Path(os.environ.get("HIVE_CWD") or os.getcwd()))
+    request = task_question(task_text, title=args.title, file_count=repo_file_count(),
+                            criteria=tier_criteria(cfg))
     resp = ask_server(request, timeout=float(args.timeout))
     answer = resp["answers"][0]
     probs = answer["probs"]
@@ -505,7 +523,7 @@ def cmd_router_serve(args):
 
 
 def cmd_router_ping(args):
-    """Check the server: change a tiny request, print the reply."""
+    """`hive router ping`: check that the server answers."""
     try:
         resp = ask_server(task_question("ping test", file_count=0), timeout=5.0)
         print(f"router: up, decision {resp['decision_id']}")
@@ -513,3 +531,12 @@ def cmd_router_ping(args):
     except RouterError as e:
         print(f"router: down: {e}")
         return 1
+
+
+def cmd_router_export(args):
+    """`hive router export`: write retraining rows from the route log."""
+    from . import routelog
+    out = Path(args.out) if args.out else None
+    path, rows = routelog.export(since=args.since, out=out)
+    print(f"router: wrote {rows} rows to {path}")
+    return 0

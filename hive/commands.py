@@ -12,9 +12,86 @@ from pathlib import Path
 from . import config, state
 from . import herdr_ops as H
 from . import bus
+from .takeover import decide_tier, human_prompt, RouterUnavailable
 
 ROLES = Path(__file__).parent / "roles"
 PENDING = state.STATE_DIR / "pending"
+
+
+# --- routing step 3b helpers -----------------------------------------------------------
+
+def _tier_choices(tier_names: list[str], default: str | None) -> list[str]:
+    """Picker choices: the router pick (default) first."""
+    if default in tier_names:
+        return [default] + [t for t in tier_names if t != default]
+    return tier_names
+
+
+def repo_file_count(repo: str | Path) -> int:
+    """Files tracked by git in the repo. 0 when git fails."""
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=str(repo), capture_output=True,
+                             text=True, timeout=10).stdout
+        return sum(1 for line in out.splitlines() if line.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+
+
+def route_for_spawn(hive, cfg, task_text: str, title: str, flag_tier: str | None,
+                    file_count: int | None = None):
+    """Decide the tier for one spawn (takeover.decide_tier). Returns
+    (route, request, human_reason) where `request` is the exact /v1/decide
+    request the router saw. The request is rebuilt deterministically when the
+    router never ran (--tier or a failed router), so log_case always has one.
+    `human_reason` is the text the picker popup got (takeover reason), None
+    when the human was never asked.
+
+    Human cancel is not a tier: the caller must stop the spawn.
+    The router client asks the socket server (router.ask_server);
+    RouterUnavailable covers missing deps, a missing model, a dead server and
+    the configured timeout.
+    """
+    from . import router
+    captured: dict = {}
+    criteria = router.tier_criteria(cfg)
+
+    def ask_router(text: str, title2: str | None) -> dict[str, float]:
+        request = router.task_question(text, title=title2,
+                                       file_count=file_count if file_count is not None
+                                       else repo_file_count(hive["repo"]),
+                                       criteria=criteria)
+        try:
+            resp = router.ask_server(request, timeout=float(cfg.routing.timeout_s))
+        except router.RouterError as e:
+            raise RouterUnavailable(str(e)) from e
+        probs = resp["answers"][0]["probs"]
+        captured["request"] = request
+        return {t: float(probs.get(t, 0.0)) for t in cfg.tiers}
+
+    def ask_human(reason: str, probs: dict[str, float], default: str | None):
+        captured["human_reason"] = reason
+        choices = _tier_choices(list(cfg.tiers), default)
+        return ask("Hive: worker tier", human_prompt(reason, probs, default), choices,
+                   workspace=hive["workspace_id"])
+
+    route = decide_tier(task_text, title, list(cfg.tiers), cfg.routing.mode,
+                        cfg.routing.min_confidence, ask_router, ask_human, flag_tier=flag_tier)
+    request = captured.get("request") or router.task_question(
+        task_text, title=title,
+        file_count=file_count if file_count is not None else repo_file_count(hive["repo"]),
+        criteria=criteria)
+    return route, request, captured.get("human_reason")
+
+
+def _route_reason(route, human_reason: str | None, cfg) -> str:
+    """Why the case lands in the retrain log. The takeover reason text when
+    the human was asked; otherwise the crafted form."""
+    if human_reason is not None:
+        return human_reason
+    if route.decided_by == "human":
+        return "router failed; human picked" if not route.probs \
+            else "human picked with router probabilities"
+    return f"low confidence {route.confidence:.2f} < {cfg.routing.min_confidence:.2f}"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -235,17 +312,33 @@ def cmd_spawn(args):
     if not task.exists():
         raise SystemExit(f"hive: task file not found: {task}")
     title = args.title or task.stem
-    hm = pick_harness_model(cfg, f"worker ({title})", workspace=hive["workspace_id"])
-    if not hm:
-        state.event(conn, hive["id"], "spawn_declined", {"title": title})
+    # Tier by router + takeover (plan §Spawn flow). --tier skips the router.
+    task_text = task.read_text(errors="replace")
+    if args.tier and args.tier not in cfg.tiers:
+        raise SystemExit(f"hive: unknown tier {args.tier!r} (known: {', '.join(cfg.tiers)})")
+    file_count = repo_file_count(hive["repo"])
+    route, router_request, human_reason = route_for_spawn(
+        hive, cfg, task_text, title, flag_tier=args.tier, file_count=file_count)
+    if route.tier is None:
+        state.event(conn, hive["id"], "spawn_declined", {"title": title, "reason": "tier cancelled"})
         print("hive: spawn declined by the human", file=sys.stderr)
         return 4
-    hname, model = hm
+    tier_cfg = cfg.tiers[route.tier]
+    hname, model = tier_cfg.harness, tier_cfg.model
     n = state.next_worker_n(conn, hive["id"])
     wb = worker_branch(hive["branch"], n)
     wt = Path(hive["worktree"]).parent / f"{hive['name']}-w{n}"
+    route_json = json.dumps({"probs": {t: round(float(p), 6) for t, p in route.probs.items()},
+                             "confidence": round(route.confidence, 6),
+                             "decided_by": route.decided_by})
     wid = state.add_worker(conn, hive_id=hive["id"], n=n, branch=wb, worktree=str(wt), harness=hname,
-                           model=model, title=title, task_ref=str(task), status="spawning")
+                           model=model, title=title, task_ref=str(task), status="spawning",
+                           tier=route.tier, route_json=route_json)
+    from . import routelog
+    routelog.log_case(hive, wid, title, task_text, router_request, route, cfg,
+                      reason=_route_reason(route, human_reason, cfg),
+                      state_features={"title": title, "file_count": file_count},
+                      human_pick=route.tier if route.decided_by == "human" else None)
     try:
         git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
         git.copy_worktreeinclude(Path(hive["repo"]), wt)
@@ -266,8 +359,12 @@ def cmd_spawn(args):
     bus.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
            sender=brain, worker=n, task=str(wid), ref=str(task), kind="new", workspace=hive["workspace_id"])
     state.update(conn, "workers", wid, status="running")
-    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title}, wid)
-    print(f"spawned w{n} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
+    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title,
+                                            "tier": route.tier}, wid)
+    state.event(conn, hive["id"], "route", {"tier": route.tier, "decided_by": route.decided_by,
+                                            "confidence": round(route.confidence, 6),
+                                            "probs": {t: round(float(p), 6) for t, p in route.probs.items()}}, wid)
+    print(f"spawned w{n} tier={route.tier} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
     return 0
 
 
@@ -284,8 +381,18 @@ def cmd_fix(args):
            ref=str(Path(args.task_file).resolve()) if args.task_file else None, workspace=hive["workspace_id"])
     state.update(conn, "workers", w["id"], status="fixing")
     state.event(conn, hive["id"], "fix", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "fix")
     print(f"fix sent to w{w['n']}")
     return 0
+
+
+def _route_outcome(worker_id: int, outcome: str) -> None:
+    """Append the retrain outcome line; never blocks the command."""
+    try:
+        from . import routelog
+        routelog.log_outcome(worker_id, outcome)
+    except OSError as e:
+        print(f"hive: route log error: {e}", file=sys.stderr)
 
 
 def _live_worker(conn, hive, wn):
@@ -339,6 +446,7 @@ def cmd_merge(args):
         return 5
     remove_worker(conn, hive, w, "merged", force_branch=False, merged_into=hive["branch"])
     state.event(conn, hive["id"], "merge", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "merge")
     print(f"merged w{w['n']} into {hive['branch']}; pane, worktree and branch removed")
     return 0
 
@@ -355,6 +463,7 @@ def cmd_discard(args):
             return 1
     remove_worker(conn, hive, w, "discarded", force_branch=True)
     state.event(conn, hive["id"], "discard", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "discard")
     print(f"discarded w{w['n']}")
     return 0
 
@@ -578,7 +687,10 @@ def register(sub) -> None:
     s = sub.add_parser("new", help="open a hive (branch -> worktree -> brain)")
     s.add_argument("--cwd"); s.set_defaults(func=cmd_new)
     s = sub.add_parser("spawn", help="spawn a worker for a task file")
-    s.add_argument("--task-file", required=True); s.add_argument("--title"); s.set_defaults(func=cmd_spawn)
+    s.add_argument("--task-file", required=True); s.add_argument("--title")
+    s.add_argument("--tier", choices=["fast", "regular", "think"], default=None,
+                   help="skip the router and force a tier")
+    s.set_defaults(func=cmd_spawn)
     s = sub.add_parser("fix", help="send a fix task to a worker")
     s.add_argument("worker"); s.add_argument("text", nargs="*"); s.add_argument("--task-file")
     s.set_defaults(func=cmd_fix)
@@ -622,6 +734,10 @@ def register_router(sub, name="router") -> None:
     c.set_defaults(func=router.cmd_router_ask)
     c = rs.add_parser("ping", help="check that the router server answers")
     c.set_defaults(func=router.cmd_router_ping)
+    c = rs.add_parser("export", help="write retraining rows (choice format) from the route log")
+    c.add_argument("--since", default=None, help="YYYY-MM-DD, cases from this date on")
+    c.add_argument("--out", default=None, help="output file (default $HIVE_STATE_DIR/route_log/export.jsonl)")
+    c.set_defaults(func=router.cmd_router_export)
 
 
 def argparse_remainder():

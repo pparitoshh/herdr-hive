@@ -146,8 +146,18 @@ endpoint and no network at run time.
 hive router setup            # install deps, download the model files (one time)
 hive router serve            # server on the Unix socket (~/.local/state/herdr-hive/router.sock)
 hive router ask --task-file F --title T   # print the tier probabilities for a task file
+hive router export [--since D] [--out F]  # retraining rows (choice format) from the route log
 hive router ping             # check the server
 ```
+
+`hive spawn` reads `tiers` and `routing` from config. The router picks the
+tier when its confidence reaches `routing.min_confidence`; below that (or when
+the deps, model files or server are missing) the human picks in the popup,
+with the router pick first and the probabilities in the prompt. The human can
+always decide with `--tier fast|regular|think`. Each spawn writes the `tier`,
+`route_json` and a `route` event; spawns the router did not decide (human pick,
+low confidence, router failure) land in `$HIVE_STATE_DIR/route_log/YYYY-MM-DD.jsonl`,
+and merge/discard/fix append one outcome line each.
 
 No `pyproject.toml` exists here, so the optional deps list replaces the extra
 `hive[router]`:
