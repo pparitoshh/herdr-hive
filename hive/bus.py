@@ -12,11 +12,41 @@ import time
 from pathlib import Path
 
 from hive import herdr_ops, state
-from hive.radio_ops import header, parse_header  # noqa: F401  (re-exports)
 
 MAX_BODY = 4096
 MAX_ATTEMPTS = 5
 BUSY = ("working", "blocked")
+
+
+class BusError(ValueError):
+    """Bad send: unknown target, bad sender, or ref outside the worktrees."""
+
+
+def header(type_: str, hive: str, worker: int | None = None, task: str | None = None,
+           ref: str | None = None, **extra) -> str:
+    parts = [f"HIVE/1 type={type_}", f"hive={hive}"]
+    if worker is not None:
+        parts.append(f"worker=w{worker}")
+    if task is not None:
+        parts.append(f"task={task}")
+    for k, v in extra.items():
+        if v is not None:
+            parts.append(f"{k}={v}")
+    if ref:
+        parts.append(f"ref={ref}")
+    return " ".join(parts)
+
+
+def parse_header(body: str) -> dict:
+    line = body.splitlines()[0] if body else ""
+    if not line.startswith("HIVE/1 "):
+        return {}
+    out = {}
+    for tok in line.split()[1:]:
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            out[k] = v
+    return out
 
 
 def brain_handle(hive: str) -> str:
@@ -50,7 +80,7 @@ def _hive(conn, handle):
     name = hive_of(handle)
     h = state.hive_by_name(conn, name) if name else None
     if h is None:
-        raise ValueError(f"unknown hive in handle: {handle}")
+        raise BusError(f"unknown hive in handle: {handle}")
     return h
 
 
@@ -89,7 +119,7 @@ def handles(workspace: str | None = None, conn=None) -> str:
 
 def _check_sender(conn, sender: str) -> None:
     if not sender:
-        raise ValueError("sender required")
+        raise BusError("sender required")
     if sender.startswith(("hive.", "bench.")):
         return  # internal senders only come from code, trust the process
     pane = os.environ.get("HERDR_PANE_ID")
@@ -97,7 +127,7 @@ def _check_sender(conn, sender: str) -> None:
         return  # headless caller (tests, scripts)
     row = conn.execute("SELECT name FROM handles WHERE pane_id=?", (pane,)).fetchone()
     if row and row["name"] != sender:
-        raise ValueError(f"sender {sender} is not the handle of this pane ({row['name']})")
+        raise BusError(f"sender {sender} is not the handle of this pane ({row['name']})")
 
 
 def _ref_ok(conn, hive_id: int, ref: str) -> bool:
@@ -138,14 +168,17 @@ def send(to: str, type_: str, hive: str, text: str, *, sender: str,
     pane_row = c.execute(
         "SELECT pane_id FROM handles WHERE hive_id=? AND name=?", (h["id"], to)).fetchone()
     if pane_row is None:
-        raise ValueError(f"unknown target: {to}")
+        raise BusError(f"unknown target: {to}")
     _check_sender(c, sender)
     if ref is not None and not _ref_ok(c, h["id"], ref):
-        raise ValueError(f"ref outside the hive or worker worktrees: {ref}")
+        raise BusError(f"ref outside the hive or worker worktrees: {ref}")
 
     head = header(type_, hive, worker=worker, task=task, **extra)
     spilled = len(text) > MAX_BODY
-    body = head + "\n" + (text[:300] if spilled else text)
+    first = text.split("\n", 1)[0]
+    body = (text if first.startswith("HIVE/1 ") else f"{head}\n{text}")
+    if spilled:
+        body = body[:300]
     cur = c.execute(
         "INSERT INTO messages(hive_id, sender, target, body, ref, reply_required, status, created_at)"
         " VALUES(?,?,?,?,?,?,'pending',?)",
@@ -202,8 +235,7 @@ def flush(conn=None) -> int:
             continue  # keep order: an earlier row for this target could not go
         if _deliver(c, row) == "delivered":
             n += 1
-        else:
-            skip.add(row["target"])
+        skip.add(row["target"])  # one delivery per target per flush; herdr can still show idle
     return n
 
 

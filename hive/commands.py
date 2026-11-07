@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import config, state
 from . import herdr_ops as H
-from . import radio_ops as R
+from . import bus
 
 ROLES = Path(__file__).parent / "roles"
 PENDING = state.STATE_DIR / "pending"
@@ -87,8 +87,8 @@ def find_key(obj, key):
 
 
 def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str):
-    """radio join (handle only) -> start harness in the pane -> inject the role prompt."""
-    R.join(handle, pane, workspace=workspace)
+    """Bus join (handle only) -> start harness in the pane -> inject the role prompt."""
+    bus.join(handle, pane, workspace=workspace)
     H.pane_rename(pane, handle)
     H.wait_shell(pane)
     H.pane_run(pane, harness.argv(model, worker=worker))
@@ -104,10 +104,10 @@ def msgs_dir(hive) -> Path:
 
 def sys_send(hive, to, type_, text, **kw):
     try:
-        R.send(to, type_, hive["name"], text, sender=R.system_handle(hive["name"]),
-               msgs_dir=msgs_dir(hive), workspace=hive["workspace_id"], **kw)
-    except RuntimeError as e:
-        print(f"hive: radio: {e}", file=sys.stderr)
+        bus.send(to, type_, hive["name"], text, sender=bus.system_handle(hive["name"]),
+                 msgs_dir=msgs_dir(hive), workspace=hive["workspace_id"], **kw)
+    except bus.BusError as e:
+        print(f"hive: bus: {e}", file=sys.stderr)
 
 
 def parse_wn(s: str) -> int:
@@ -176,7 +176,7 @@ def _open_hive_body(conn, git, root, cfg, branch, name, workspace_for_popup, clo
     hid = state.add_hive(conn, name=name, repo=str(root), branch=branch, base=cfg.base_branch, worktree=wt,
                          workspace_id=ws, brain_pane=brain_pane, brain_harness=hname, brain_model=model)
     state.event(conn, hid, "open", {"branch": branch})
-    brain = R.brain_handle(name)
+    brain = bus.brain_handle(name)
     role = role_text("brain", hive=name, branch=branch, base=cfg.base_branch, worktree=wt, brain=brain,
                      max_workers=cfg.max_workers)
     launch_agent(brain_pane, brain, cfg.harness(hname), model, worker=False, role=role, workspace=ws)
@@ -213,7 +213,7 @@ def cmd_spawn(args):
     conn = state.connect()
     hive = _current_hive(conn)
     cfg = config.load(Path(hive["repo"]))
-    brain = R.brain_handle(hive["name"])
+    brain = bus.brain_handle(hive["name"])
     live = state.workers(conn, hive["id"], live_only=True)
     if len(live) >= cfg.max_workers:
         msg = f"cap reached: {len(live)}/{cfg.max_workers} workers live. Merge or discard one first."
@@ -242,7 +242,7 @@ def cmd_spawn(args):
         direction = "down" if live else "right"
         pane = H.split(target, direction, str(wt), env={"HIVE_NAME": hive["name"]})
         state.update(conn, "workers", wid, pane_id=pane)
-        handle = R.worker_handle(hive["name"], n)
+        handle = bus.worker_handle(hive["name"], n)
         role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
                          branch=hive["branch"], handle=handle, brain=brain)
         launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
@@ -251,7 +251,7 @@ def cmd_spawn(args):
         state.update(conn, "workers", wid, status="failed")
         state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
         raise
-    R.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
+    bus.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
            sender=brain, worker=n, task=str(wid), ref=str(task), kind="new", workspace=hive["workspace_id"])
     state.update(conn, "workers", wid, status="running")
     state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title}, wid)
@@ -266,7 +266,8 @@ def cmd_fix(args):
     text = Path(args.task_file).read_text() if args.task_file else " ".join(args.text or [])
     if not text:
         raise SystemExit("hive: give --task-file or text")
-    R.send(R.worker_handle(hive["name"], w["n"]), "task", hive["name"], text, sender=R.brain_handle(hive["name"]),
+    bus.send(bus.worker_handle(hive["name"], w["n"]), "task", hive["name"], text,
+             sender=bus.brain_handle(hive["name"]),
            msgs_dir=msgs_dir(hive), worker=w["n"], task=str(w["id"]), kind="fix",
            ref=str(Path(args.task_file).resolve()) if args.task_file else None, workspace=hive["workspace_id"])
     state.update(conn, "workers", w["id"], status="fixing")
@@ -288,7 +289,7 @@ def remove_worker(conn, hive, w, status, force_branch=False, merged_into=None):
     git = G()
     if w["pane_id"]:
         H.pane_close(w["pane_id"])
-    R.part(R.worker_handle(hive["name"], w["n"]), workspace=hive["workspace_id"])
+    bus.part(bus.worker_handle(hive["name"], w["n"]), workspace=hive["workspace_id"])
     repo = Path(hive["repo"])
     try:
         git.worktree_remove(repo, Path(w["worktree"]), force=force_branch)
@@ -310,7 +311,7 @@ def cmd_merge(args):
     hive = _current_hive(conn)
     w = _live_worker(conn, hive, args.worker)
     if git.has_uncommitted(Path(w["worktree"])):
-        sys_send(hive, R.worker_handle(hive["name"], w["n"]), "system",
+        sys_send(hive, bus.worker_handle(hive["name"], w["n"]), "system",
                  "The brain tried to merge, but your worktree has uncommitted changes. Commit them and report again.",
                  worker=w["n"])
         raise SystemExit(f"hive: w{w['n']} has uncommitted changes; told the worker to commit")
@@ -318,7 +319,7 @@ def cmd_merge(args):
     if not ok:
         state.event(conn, hive["id"], "conflict", {"files": out}, w["id"])
         state.update(conn, "workers", w["id"], status="fixing")
-        sys_send(hive, R.worker_handle(hive["name"], w["n"]), "conflict",
+        sys_send(hive, bus.worker_handle(hive["name"], w["n"]), "conflict",
                  f"Merge into {hive['branch']} conflicted (merge aborted). Run `git rebase {hive['branch']}`, "
                  f"resolve, run the tests, and report again.\nConflicted files:\n{out}",
                  worker=w["n"], task=str(w["id"]))
@@ -388,7 +389,7 @@ def cmd_close(args):
             return 1
     for w in live:
         remove_worker(conn, hive, w, "discarded", force_branch=True)
-    R.part(R.brain_handle(hive["name"]), workspace=hive["workspace_id"])
+    bus.part(bus.brain_handle(hive["name"]), workspace=hive["workspace_id"])
     state.update(conn, "hives", hive["id"], status="closed")
     state.event(conn, hive["id"], "close", {})
     print(f"hive {hive['name']} closed; the hive worktree {hive['worktree']} is kept")
@@ -489,6 +490,16 @@ def cmd_reconcile(args):
                 state.update(conn, "workers", w["id"], status="failed")
                 state.event(conn, h["id"], "orphan", {"n": w["n"]}, w["id"])
                 changed += 1
+    for row in conn.execute(
+        "SELECT handles.name AS name, handles.pane_id AS pane_id FROM handles"
+        " JOIN hives ON hives.id=handles.hive_id WHERE hives.status='open'"
+    ).fetchall():
+        if row["pane_id"] in panes:
+            continue
+        conn.execute("UPDATE messages SET status='failed' WHERE target=? AND status='pending'",
+                     (row["name"],))
+        bus.part(row["name"], conn=conn)
+        changed += 1
     if not args.quiet:
         print(f"reconciled: {changed} orphan(s) marked failed")
     return 0

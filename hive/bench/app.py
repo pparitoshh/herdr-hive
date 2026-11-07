@@ -14,10 +14,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, OptionList, Select, Static
 
-from .. import config, diffs, radio_ops, state
+from .. import bus, config, diffs, state
 
 # Injectable seams (tests monkeypatch these module attributes).
-radio_send = radio_ops.send
+bus_send = bus.send
 load_worker_diff = diffs.worker_diff
 load_total_diff = diffs.total_diff
 run_subprocess = subprocess.run
@@ -127,6 +127,13 @@ class BenchApp(App):
         self.query_one("#files", DataTable).add_column("file")
         self.refresh_all()
         self.set_interval(5, self.refresh_all)
+        self.set_interval(5, self._flush_bus)
+
+    def _flush_bus(self) -> None:
+        try:
+            bus.flush(self.conn)
+        except Exception as e:
+            self.set_status(f"bus flush error: {e}")
 
     # ---------- helpers ----------
     @property
@@ -148,11 +155,11 @@ class BenchApp(App):
 
     def _send(self, to: str, type_: str, text: str, **kw) -> bool:
         try:
-            radio_send(to, type_, self.hive_name, text, sender=radio_ops.bench_handle(self.hive_name),
-                       msgs_dir=self.msgs_dir, workspace=self.hive["workspace_id"], **kw)
+            bus_send(to, type_, self.hive_name, text, sender=bus.bench_handle(self.hive_name),
+                     msgs_dir=self.msgs_dir, workspace=self.hive["workspace_id"], conn=self.conn, **kw)
             return True
-        except Exception as e:  # radio failures must not crash the bench
-            self.set_status(f"radio error ({type_} -> {to}): {e}")
+        except Exception as e:  # bus failures must not crash the bench
+            self.set_status(f"bus error ({type_} -> {to}): {e}")
             return False
 
     def current_diff_text(self) -> str:
@@ -274,10 +281,10 @@ class BenchApp(App):
             return
         body = f"{f}:{line}\n{text}"
         n = self._entry_n()
-        brain = radio_ops.brain_handle(self.hive_name)
+        brain = bus.brain_handle(self.hive_name)
         sent = []
         if n is not None:
-            to = radio_ops.worker_handle(self.hive_name, n)
+            to = bus.worker_handle(self.hive_name, n)
             if self._send(to, "review_comment", body, worker=n, file=f, line=line):
                 sent.append(to)
         if self._send(brain, "review_comment", body, worker=n, file=f, line=line):
@@ -295,7 +302,7 @@ class BenchApp(App):
         n = self._need_worker()
         if n is None:
             return
-        if self._send(radio_ops.brain_handle(self.hive_name), "verdict", f"w{n} approved by human",
+        if self._send(bus.brain_handle(self.hive_name), "verdict", f"w{n} approved by human",
                       worker=n, value="approve"):
             self.set_status(f"approved w{n}")
 
@@ -308,7 +315,7 @@ class BenchApp(App):
     def _do_reject(self, n: int, reason: str | None) -> None:
         if not reason:
             return
-        if self._send(radio_ops.brain_handle(self.hive_name), "verdict", f"w{n} rejected: {reason}",
+        if self._send(bus.brain_handle(self.hive_name), "verdict", f"w{n} rejected: {reason}",
                       worker=n, value="reject"):
             self.set_status(f"rejected w{n}")
 
@@ -398,7 +405,7 @@ class BenchApp(App):
             return
         n = int(self.ai_entry[1:]) if self.ai_entry and self.ai_entry != TOTAL else None
         summary = self.ai_findings[:300]
-        if self._send(radio_ops.brain_handle(self.hive_name), "ai_review", summary, worker=n, ref=str(path)):
+        if self._send(bus.brain_handle(self.hive_name), "ai_review", summary, worker=n, ref=str(path)):
             self.set_status(f"AI findings forwarded to brain ({path.name})")
 
     def action_open_editor(self) -> None:

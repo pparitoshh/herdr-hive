@@ -151,6 +151,25 @@ class BusTest(unittest.TestCase):
             bus.flush(conn=self.conn)
         self.assertEqual(bus.show(1, conn=self.conn)["status"], "failed")
 
+    def test_flush_one_delivery_per_target(self):
+        ps, ap = self.fake_herdr()
+        STATE.update(agent_status="working")
+        with ps, ap:
+            first = self.send()
+            second = self.send()
+        self.assertEqual(bus.show(first, conn=self.conn)["status"], "pending")
+        self.assertEqual(bus.show(second, conn=self.conn)["status"], "pending")
+        STATE.update(agent_status="idle")
+        with ps, ap:
+            n = bus.flush(conn=self.conn)
+            self.assertEqual(n, 1)
+            self.assertEqual(bus.show(first, conn=self.conn)["status"], "delivered")
+            self.assertEqual(bus.show(second, conn=self.conn)["status"], "pending")
+            n = bus.flush(conn=self.conn)
+            self.assertEqual(n, 1)
+            self.assertEqual(bus.show(second, conn=self.conn)["status"], "delivered")
+        self.assertEqual(len(self.calls), 2)
+
     def test_flush_keeps_order_and_skips_stuck_target(self):
         def st(pane):
             return {"agent_status": "working" if pane == "pane-w1" else "idle", "focused": False}

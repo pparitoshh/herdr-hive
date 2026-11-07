@@ -53,6 +53,49 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _sender() -> str:
+    """The message bus handle bound to the pane that runs this command."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        raise SystemExit("hive: $HERDR_PANE_ID is not set; msg, inbox and show need a herdr pane")
+    row = state.connect().execute("SELECT name FROM handles WHERE pane_id=?", (pane,)).fetchone()
+    if row is None:
+        raise SystemExit(f"hive: no handle is bound to pane {pane}")
+    return row["name"]
+
+
+def cmd_msg(args) -> int:
+    from . import bus
+    conn = state.connect()
+    hive = current_hive(conn)
+    mid = bus.send(args.handle, "chat", hive["name"], args.text, sender=_sender(),
+                   ref=args.ref, reply_required=args.reply_required, workspace=hive["workspace_id"])
+    print(f"sent {mid}")
+    return 0
+
+
+def cmd_inbox(args) -> int:
+    from . import bus
+    rows = bus.inbox(_sender(), conn=state.connect())
+    if not rows:
+        print("(empty)")
+        return 0
+    for r in rows:
+        first = (r["body"] or "").splitlines()[0]
+        mark = "R" if r["reply_required"] else " "
+        print(f"{r['id']:<4} {r['status']:<9} from={r['sender']} {mark} {first}")
+    return 0
+
+
+def cmd_show(args) -> int:
+    from . import bus
+    row = bus.show(args.id)
+    if row is None:
+        raise SystemExit(f"hive: no message {args.id}")
+    print(bus.envelope(row))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hive", description="brain + workers per herdr workspace")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -62,17 +105,40 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="every open hive, not only this one")
     s.set_defaults(func=cmd_status)
 
+    s = sub.add_parser("msg", help="send a message to a handle (agents: put the HIVE/1 line first)")
+    s.add_argument("handle")
+    s.add_argument("text")
+    s.add_argument("--ref")
+    s.add_argument("--reply-required", action="store_true")
+    s.set_defaults(func=cmd_msg)
+
+    s = sub.add_parser("inbox", help="messages addressed to this pane's handle")
+    s.set_defaults(func=cmd_inbox)
+
+    s = sub.add_parser("show", help="show one message by id")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_show)
+
     from . import commands  # registers the remaining subcommands
     commands.register(sub)
     return p
 
 
 def main(argv=None) -> int:
+    os.umask(0o077)
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args) or 0)
+        code = int(args.func(args) or 0)
     except KeyboardInterrupt:
-        return 130
+        code = 130
+    finally:
+        if args.cmd not in ("picker", "hook"):  # these run inside herdr, not a shell command
+            try:
+                from . import bus  # push every pending message
+                bus.flush()
+            except Exception:
+                pass
+    return code
 
 
 if __name__ == "__main__":
