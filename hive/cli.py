@@ -131,6 +131,13 @@ def main(argv=None) -> int:
         code = int(args.func(args) or 0)
     except KeyboardInterrupt:
         code = 130
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+        if e.code and not isinstance(e.code, int):  # argparse errors print themselves
+            print(e.code, file=sys.stderr)
+    except ValueError as e:  # bus.BusError and other bad-input errors
+        print(f"hive: {e}", file=sys.stderr)
+        code = 1
     finally:
         if args.cmd not in ("picker", "hook"):  # these run inside herdr, not a shell command
             try:
