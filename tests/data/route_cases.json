@@ -1,0 +1,150 @@
+[
+  {
+    "title": "README typo",
+    "task": "`hive status` mentions `worker tierz` in the output table section of README.md. Fix the typo and read the section again for other obvious misspellings. Only README.md may change.",
+    "tier": "fast",
+    "why": "One file, mechanical text fix, no design and no tests."
+  },
+  {
+    "title": "delete unused import",
+    "task": "ruff reports F401 for `shutil` in hive/git_ops.py. Remove the import. Run `python3 -m py_compile hive/git_ops.py` to confirm the file still parses. No other files may change.",
+    "tier": "fast",
+    "why": "Single line removal in one file, clear change."
+  },
+  {
+    "title": "version flag",
+    "task": "Add a `--version` flag to `bin/hive` that prints the value of `hive/__init__.py` `__version__` and exits 0. Read the version from that file, keep it as the only source. No new tests needed for now.",
+    "tier": "fast",
+    "why": "One small flag in one entry point, change fully specified, no tests."
+  },
+  {
+    "title": "picker env error wording",
+    "task": "In hive/picker.py main(), the missing-env case (HIVE_PICKER_REQ or HIVE_PICKER_OUT absent) prints a generic message. Change the message to name which env var is missing, like `hive picker: HIVE_PICKER_REQ not set`. Keep the old message for a broken JSON body. Only the main() function may change.",
+    "tier": "fast",
+    "why": "One function only, but two message branches and a keep-vs-change decision; borderline fast/regular.",
+    "borderline": true
+  },
+  {
+    "title": "docstrings for state helpers",
+    "task": "Functions `connect`, `get_worker`, and `touch_worker` in hive/state.py have no docstrings and a style check complained. Write a short docstring for each from the SQLite schema in the same file. No behavior change; keep the module importable.",
+    "tier": "fast",
+    "why": "Documentation-only change in one file."
+  },
+  {
+    "title": "flake8 line lengths",
+    "task": "flake8 E501 fails on 6 long lines in hive/bus.py. Two are at lines 22 and 44, three sit around lines 47 to 49, and one is in `_next_seq`. Wrap them to 88 characters. Do not touch anything else.",
+    "tier": "fast",
+    "why": "Pure formatting at exact spots, one file."
+  },
+  {
+    "title": "idle timeout default",
+    "task": "The router `idle_exit` default in the config defaults is 30 min but the plan now says 20 min. Change the default value and update the README line that still says 30. Two files, a one-line edit each.",
+    "tier": "fast",
+    "why": "Two one-line mechanical edits, both spots are named."
+  },
+  {
+    "title": "remove dead helper",
+    "task": "`grep -rn _walk_tree hive/ tests/` finds no caller for `_walk_tree` except its definition in hive/diffs.py. Delete the function. Confirm with the grep and compile the module.",
+    "tier": "fast",
+    "why": "Dead-code removal in one file, verification is mechanical."
+  },
+  {
+    "title": "spawn retry wrapper",
+    "task": "`hive spawn` fails when the plugin venv is slow to start. Wrap `launch_agent` in a retry loop: up to 3 attempts with a 2 s gap, and retry only on FileNotFoundError and OSError. Add a test with a fake launcher that raises twice and then succeeds, and a test that a third failure returns exit code 1. Files to touch: hive/herdr_ops.py and tests/test_herdr_ops.py.",
+    "tier": "regular",
+    "why": "Normal feature with tests in several files, the design is still clear."
+  },
+  {
+    "title": "off-by-one in bus pruning",
+    "task": "Bug: `hive bus prune --keep 5` leaves 6 messages. The count check in hive/bus.py includes the boundary message one time too many. Fix it and add a regression test with a seeded queue. Also fix the second pruning spot in hive/cli.py that copied the same logic.",
+    "tier": "regular",
+    "why": "Understood bug fix with tests, spans two files."
+  },
+  {
+    "title": "dry-run flag",
+    "task": "Add a global `--dry-run` flag to `hive spawn`. When set, print the resolved command line and the tier that would run, then exit 0 without spawning. Wire the flag through `cmd_spawn`, the picker path, and the config defaults. Add two cases to tests/test_cli.py and one to tests/test_hook.py.",
+    "tier": "regular",
+    "why": "Feature through three files with tests, no design open questions."
+  },
+  {
+    "title": "picker unicode titles",
+    "task": "The picker popup shows raw JSON escapes when the task title contains a unicode letter (reported title: resumé step). Make picker request and output loading always UTF-8, independent of locale. Update the request building in hive/herdr_ops.py and add a test with a two-byte title in tests/test_picker.py.",
+    "tier": "regular",
+    "why": "Understood fix with tests, spans three files."
+  },
+  {
+    "title": "migration missing columns",
+    "task": "Workers created before the routing upgrade have no `tier` and `route_json` columns, so `hive status` crashes with sqlite3.OperationalError. Add migration code in hive/state.py: on connect, inspect the table columns and run ALTER TABLE for each missing one. Decide first how to keep migration state safe when two workers connect at the same time, and cover it in tests/test_state.py in three ways: old schema, new schema, and a second migration to prove idempotence.",
+    "tier": "think",
+    "why": "The edit itself is mechanical, but the concurrent-migration question needs a small design first; borderline regular/think.",
+    "borderline": true
+  },
+  {
+    "title": "status JSON output",
+    "task": "Add `--json` to `hive status`. The JSON lists one object per worker with id, tier, state and the route fields (probs, confidence, decided_by), plus a top-level `state_dir` key. Update tests/test_cli.py with one case for a worker row and one for an empty table.",
+    "tier": "regular",
+    "why": "Normal feature with a clear output shape and tests."
+  },
+  {
+    "title": "diff context lines",
+    "task": "hive/diffs.py always shows 3 context lines, so large moved blocks hide the change. Add an `-n` option that goes through both call sites in hive/commands.py and the tests. Keep the default behavior identical. Add two test cases: a small diff and a diff with a large removed block.",
+    "tier": "regular",
+    "why": "Feature with clear scope, touches three files plus tests."
+  },
+  {
+    "title": "stale picker answer",
+    "task": "Bug report: `hive ask` on a fresh clone leaves a stale out file, so the next spawn reads an old answer and picks the wrong tier. Fix the cleanup so a spawn removes both the req and the out files after it reads them, update the module docstring about atomic replacement, and add cleanup tests. Files: hive/picker.py, hive/herdr_ops.py, tests/test_picker.py.",
+    "tier": "regular",
+    "why": "Clear bug in a known flow, needs care with atomic file reuse."
+  },
+  {
+    "title": "client summary numbers",
+    "task": "The daily summary mixes two query windows, so some numbers are wrong for a client report. There is no existing test for the summary helper; add helper tests, keep the old group-by rule for the first window, and confirm the change with three cases.",
+    "tier": "regular",
+    "why": "Simple changes, but the first adult review loop and a clear test plan are needed.",
+    "borderline": true
+  },
+  {
+    "title": "decode legacy health records",
+    "task": "A health record batch decodes fine by itself, but restoring the full production archive fails on a deprecated field, and the restore path that fails is not in the obvious logs. Find where the restore actually fails, decide how to tolerate the old field name without letting bad records in, and add an archive-restore regression test. Do not touch the live writer yet.",
+    "tier": "think",
+    "why": "Partly mechanical mapping, but the failure path is unclear and a tolerance decision needs thought; borderline regular/think.",
+    "borderline": true
+  },
+  {
+    "title": "append race in bus",
+    "task": "A test with 4 workers hit `INSERT INTO task failed: database is locked` one time in worker A. hive/bus.py has no lock guard for concurrent appends. Investigate which call sites race, decide between a file lock or a busy_timeout and WAL setting plus a retry, plan it first, then implement and add a concurrent test. Concurrency bug, unclear scope, needs a design answer.",
+    "tier": "think",
+    "why": "Concurrency problem with unclear root cause, needs a design before the fix."
+  },
+  {
+    "title": "status latency spike",
+    "task": "The worker saw the status command go over 500 ms only on big repos with 599 sessions. The theory that the event loop socket causes it has already failed twice. Profile the command on a large seeded repo, scan every hop, and find the real cause before the fix. Unclear repro, perf investigation.",
+    "tier": "think",
+    "why": "Perf bug with a failed first hypothesis, needs careful measurement."
+  },
+  {
+    "title": "schema source of truth",
+    "task": "The modules state.py, cli.py, and the status helpers each hard-code their own idea of the worker row schema. Design one source of truth: a versioned migration table with a record of what each migration did. Write a design note first, close duplicate comments from earlier runs, and only then change code. Cross-module refactor, needs a design first.",
+    "tier": "think",
+    "why": "Multi-module refactor that needs a design decision before code."
+  },
+  {
+    "title": "plugin hook design",
+    "task": "Third-party plugins want hooks between spawn, route, and merge, but no design keeps the core honest. Research how comparable plugin hook systems solve the loop, write the trade-offs, and produce a design doc with one concrete interface. Do not implement anything yet. Big design piece with an unclear end shape.",
+    "tier": "think",
+    "why": "Design work, unclear end shape, no mechanical part."
+  },
+  {
+    "title": "memory creep in router server",
+    "task": "The router server grows about 300 MB per 6 hours at a stable request rate. Suspects: the option span cache grows, the onnx session holds buffers per request, or eviction never runs. The regression test reproduces 4.8% growth per request. Find where memory grows, prefer a design memo over scattered fixes, then fix and re-run the regression test. Non-obvious bug with design trade-offs.",
+    "tier": "think",
+    "why": "Memory bug without a certain fault site and a design trade-off at the end."
+  },
+  {
+    "title": "flaky upgrade test",
+    "task": "test_hook_upgrade fails about 25% of the time in CI with `InterruptedError: 10` yet never locally, 200 runs at a 0% rate. The only difference is how the CI build puts the plugin venv on PATH. Read the setup path, rework the test to be independent of PATH order, and confirm 100 CI runs pass. Hard debug, unclear root cause, several files in play.",
+    "tier": "think",
+    "why": "Flaky test with an environment root cause and no local repro."
+  }
+]

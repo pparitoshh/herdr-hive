@@ -1,4 +1,4 @@
-"""Pure git diff helpers for the review bench (spec §7). No herdr, no radio."""
+"""Pure git diff helpers for the review bench (spec §7). No herdr, no network."""
 from __future__ import annotations
 
 import re

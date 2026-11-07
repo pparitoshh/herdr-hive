@@ -11,10 +11,87 @@ from pathlib import Path
 
 from . import config, state
 from . import herdr_ops as H
-from . import radio_ops as R
+from . import bus
+from .takeover import decide_tier, human_prompt, RouterUnavailable
 
 ROLES = Path(__file__).parent / "roles"
 PENDING = state.STATE_DIR / "pending"
+
+
+# --- routing step 3b helpers -----------------------------------------------------------
+
+def _tier_choices(tier_names: list[str], default: str | None) -> list[str]:
+    """Picker choices: the router pick (default) first."""
+    if default in tier_names:
+        return [default] + [t for t in tier_names if t != default]
+    return tier_names
+
+
+def repo_file_count(repo: str | Path) -> int:
+    """Files tracked by git in the repo. 0 when git fails."""
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=str(repo), capture_output=True,
+                             text=True, timeout=10).stdout
+        return sum(1 for line in out.splitlines() if line.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+
+
+def route_for_spawn(hive, cfg, task_text: str, title: str, flag_tier: str | None,
+                    file_count: int | None = None):
+    """Decide the tier for one spawn (takeover.decide_tier). Returns
+    (route, request, human_reason) where `request` is the exact /v1/decide
+    request the router saw. The request is rebuilt deterministically when the
+    router never ran (--tier or a failed router), so log_case always has one.
+    `human_reason` is the text the picker popup got (takeover reason), None
+    when the human was never asked.
+
+    Human cancel is not a tier: the caller must stop the spawn.
+    The router client asks the socket server (router.ask_server);
+    RouterUnavailable covers missing deps, a missing model, a dead server and
+    the configured timeout.
+    """
+    from . import router
+    captured: dict = {}
+    criteria = router.tier_criteria(cfg)
+
+    def ask_router(text: str, title2: str | None) -> dict[str, float]:
+        request = router.task_question(text, title=title2,
+                                       file_count=file_count if file_count is not None
+                                       else repo_file_count(hive["repo"]),
+                                       criteria=criteria)
+        try:
+            resp = router.ask_server(request, timeout=float(cfg.routing.timeout_s))
+        except router.RouterError as e:
+            raise RouterUnavailable(str(e)) from e
+        probs = resp["answers"][0]["probs"]
+        captured["request"] = request
+        return {t: float(probs.get(t, 0.0)) for t in cfg.tiers}
+
+    def ask_human(reason: str, probs: dict[str, float], default: str | None):
+        captured["human_reason"] = reason
+        choices = _tier_choices(list(cfg.tiers), default)
+        return ask("Hive: worker tier", human_prompt(reason, probs, default), choices,
+                   workspace=hive["workspace_id"])
+
+    route = decide_tier(task_text, title, list(cfg.tiers), cfg.routing.mode,
+                        cfg.routing.min_confidence, ask_router, ask_human, flag_tier=flag_tier)
+    request = captured.get("request") or router.task_question(
+        task_text, title=title,
+        file_count=file_count if file_count is not None else repo_file_count(hive["repo"]),
+        criteria=criteria)
+    return route, request, captured.get("human_reason")
+
+
+def _route_reason(route, human_reason: str | None, cfg) -> str:
+    """Why the case lands in the retrain log. The takeover reason text when
+    the human was asked; otherwise the crafted form."""
+    if human_reason is not None:
+        return human_reason
+    if route.decided_by == "human":
+        return "router failed; human picked" if not route.probs \
+            else "human picked with router probabilities"
+    return f"low confidence {route.confidence:.2f} < {cfg.routing.min_confidence:.2f}"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -86,12 +163,22 @@ def find_key(obj, key):
     return None
 
 
-def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str):
-    """radio join (handle only) -> start harness in the pane -> inject the role prompt."""
-    R.join(handle, pane, workspace=workspace)
+def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str,
+                 worktree: str | None = None):
+    """Bus join (handle only) -> start harness in the pane -> inject the role prompt.
+
+    A worker needs TMPDIR=<worktree>/.tmp: OpenCode rejects writes outside the
+    worktree and a /tmp write stopped a run (plan §Worker temp dir).
+    """
+    bus.join(handle, pane, workspace=workspace)
     H.pane_rename(pane, handle)
     H.wait_shell(pane)
-    H.pane_run(pane, harness.argv(model, worker=worker))
+    argv = harness.argv(model, worker=worker)
+    if worker and worktree:
+        tmp = Path(worktree) / ".tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        argv = ["env", f"TMPDIR={tmp}", *argv]
+    H.pane_run(pane, argv)
     if not H.wait_agent_ready(pane):
         raise SystemExit(f"hive: {harness.name} did not become ready in pane {pane}")
     H.agent_prompt(pane, role)
@@ -104,10 +191,10 @@ def msgs_dir(hive) -> Path:
 
 def sys_send(hive, to, type_, text, **kw):
     try:
-        R.send(to, type_, hive["name"], text, sender=R.system_handle(hive["name"]),
-               msgs_dir=msgs_dir(hive), workspace=hive["workspace_id"], **kw)
-    except RuntimeError as e:
-        print(f"hive: radio: {e}", file=sys.stderr)
+        bus.send(to, type_, hive["name"], text, sender=bus.system_handle(hive["name"]),
+                 msgs_dir=msgs_dir(hive), workspace=hive["workspace_id"], **kw)
+    except bus.BusError as e:
+        print(f"hive: bus: {e}", file=sys.stderr)
 
 
 def parse_wn(s: str) -> int:
@@ -163,6 +250,7 @@ def _open_hive_body(conn, git, root, cfg, branch, name, workspace_for_popup, clo
     wt = str(Path(wt).resolve())
     git.copy_worktreeinclude(root, Path(wt))
     git.add_info_exclude(Path(wt), ".hive/")
+    git.add_info_exclude(Path(wt), ".tmp/")
     if close_ws:
         H.workspace_close(close_ws)
     hm = pick_harness_model(cfg, "brain", workspace=ws)
@@ -176,7 +264,7 @@ def _open_hive_body(conn, git, root, cfg, branch, name, workspace_for_popup, clo
     hid = state.add_hive(conn, name=name, repo=str(root), branch=branch, base=cfg.base_branch, worktree=wt,
                          workspace_id=ws, brain_pane=brain_pane, brain_harness=hname, brain_model=model)
     state.event(conn, hid, "open", {"branch": branch})
-    brain = R.brain_handle(name)
+    brain = bus.brain_handle(name)
     role = role_text("brain", hive=name, branch=branch, base=cfg.base_branch, worktree=wt, brain=brain,
                      max_workers=cfg.max_workers)
     launch_agent(brain_pane, brain, cfg.harness(hname), model, worker=False, role=role, workspace=ws)
@@ -213,7 +301,7 @@ def cmd_spawn(args):
     conn = state.connect()
     hive = _current_hive(conn)
     cfg = config.load(Path(hive["repo"]))
-    brain = R.brain_handle(hive["name"])
+    brain = bus.brain_handle(hive["name"])
     live = state.workers(conn, hive["id"], live_only=True)
     if len(live) >= cfg.max_workers:
         msg = f"cap reached: {len(live)}/{cfg.max_workers} workers live. Merge or discard one first."
@@ -224,38 +312,59 @@ def cmd_spawn(args):
     if not task.exists():
         raise SystemExit(f"hive: task file not found: {task}")
     title = args.title or task.stem
-    hm = pick_harness_model(cfg, f"worker ({title})", workspace=hive["workspace_id"])
-    if not hm:
-        state.event(conn, hive["id"], "spawn_declined", {"title": title})
+    # Tier by router + takeover (plan §Spawn flow). --tier skips the router.
+    task_text = task.read_text(errors="replace")
+    if args.tier and args.tier not in cfg.tiers:
+        raise SystemExit(f"hive: unknown tier {args.tier!r} (known: {', '.join(cfg.tiers)})")
+    file_count = repo_file_count(hive["repo"])
+    route, router_request, human_reason = route_for_spawn(
+        hive, cfg, task_text, title, flag_tier=args.tier, file_count=file_count)
+    if route.tier is None:
+        state.event(conn, hive["id"], "spawn_declined", {"title": title, "reason": "tier cancelled"})
         print("hive: spawn declined by the human", file=sys.stderr)
         return 4
-    hname, model = hm
+    tier_cfg = cfg.tiers[route.tier]
+    hname, model = tier_cfg.harness, tier_cfg.model
     n = state.next_worker_n(conn, hive["id"])
     wb = worker_branch(hive["branch"], n)
     wt = Path(hive["worktree"]).parent / f"{hive['name']}-w{n}"
+    route_json = json.dumps({"probs": {t: round(float(p), 6) for t, p in route.probs.items()},
+                             "confidence": round(route.confidence, 6),
+                             "decided_by": route.decided_by})
     wid = state.add_worker(conn, hive_id=hive["id"], n=n, branch=wb, worktree=str(wt), harness=hname,
-                           model=model, title=title, task_ref=str(task), status="spawning")
+                           model=model, title=title, task_ref=str(task), status="spawning",
+                           tier=route.tier, route_json=route_json)
+    from . import routelog
+    routelog.log_case(hive, wid, title, task_text, router_request, route, cfg,
+                      reason=_route_reason(route, human_reason, cfg),
+                      state_features={"title": title, "file_count": file_count},
+                      human_pick=route.tier if route.decided_by == "human" else None)
     try:
         git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
         git.copy_worktreeinclude(Path(hive["repo"]), wt)
+        git.add_info_exclude(wt, ".tmp/")
         target = live[-1]["pane_id"] if live else hive["brain_pane"]
         direction = "down" if live else "right"
         pane = H.split(target, direction, str(wt), env={"HIVE_NAME": hive["name"]})
         state.update(conn, "workers", wid, pane_id=pane)
-        handle = R.worker_handle(hive["name"], n)
+        handle = bus.worker_handle(hive["name"], n)
         role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
                          branch=hive["branch"], handle=handle, brain=brain)
         launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
-                     workspace=hive["workspace_id"])
+                     workspace=hive["workspace_id"], worktree=str(wt))
     except Exception as e:
         state.update(conn, "workers", wid, status="failed")
         state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
         raise
-    R.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
+    bus.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
            sender=brain, worker=n, task=str(wid), ref=str(task), kind="new", workspace=hive["workspace_id"])
     state.update(conn, "workers", wid, status="running")
-    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title}, wid)
-    print(f"spawned w{n} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
+    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title,
+                                            "tier": route.tier}, wid)
+    state.event(conn, hive["id"], "route", {"tier": route.tier, "decided_by": route.decided_by,
+                                            "confidence": round(route.confidence, 6),
+                                            "probs": {t: round(float(p), 6) for t, p in route.probs.items()}}, wid)
+    print(f"spawned w{n} tier={route.tier} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
     return 0
 
 
@@ -266,13 +375,29 @@ def cmd_fix(args):
     text = Path(args.task_file).read_text() if args.task_file else " ".join(args.text or [])
     if not text:
         raise SystemExit("hive: give --task-file or text")
-    R.send(R.worker_handle(hive["name"], w["n"]), "task", hive["name"], text, sender=R.brain_handle(hive["name"]),
+    bus.send(bus.worker_handle(hive["name"], w["n"]), "task", hive["name"], text,
+             sender=bus.brain_handle(hive["name"]),
            msgs_dir=msgs_dir(hive), worker=w["n"], task=str(w["id"]), kind="fix",
            ref=str(Path(args.task_file).resolve()) if args.task_file else None, workspace=hive["workspace_id"])
     state.update(conn, "workers", w["id"], status="fixing")
     state.event(conn, hive["id"], "fix", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "fix", hive=hive)
     print(f"fix sent to w{w['n']}")
     return 0
+
+
+def _route_outcome(worker_id: int, outcome: str, hive=None) -> None:
+    """Append the retrain outcome line (only when routing.save_cases is on).
+    Never blocks the command."""
+    try:
+        from . import routelog
+        if hive is not None:
+            cfg = config.load(Path(hive["repo"]))
+            routelog.log_outcome(worker_id, outcome, cfg)
+        else:
+            routelog.log_outcome(worker_id, outcome)  # the caller decides with env/config
+    except OSError as e:
+        print(f"hive: route log error: {e}", file=sys.stderr)
 
 
 def _live_worker(conn, hive, wn):
@@ -288,7 +413,7 @@ def remove_worker(conn, hive, w, status, force_branch=False, merged_into=None):
     git = G()
     if w["pane_id"]:
         H.pane_close(w["pane_id"])
-    R.part(R.worker_handle(hive["name"], w["n"]), workspace=hive["workspace_id"])
+    bus.part(bus.worker_handle(hive["name"], w["n"]), workspace=hive["workspace_id"])
     repo = Path(hive["repo"])
     try:
         git.worktree_remove(repo, Path(w["worktree"]), force=force_branch)
@@ -310,7 +435,7 @@ def cmd_merge(args):
     hive = _current_hive(conn)
     w = _live_worker(conn, hive, args.worker)
     if git.has_uncommitted(Path(w["worktree"])):
-        sys_send(hive, R.worker_handle(hive["name"], w["n"]), "system",
+        sys_send(hive, bus.worker_handle(hive["name"], w["n"]), "system",
                  "The brain tried to merge, but your worktree has uncommitted changes. Commit them and report again.",
                  worker=w["n"])
         raise SystemExit(f"hive: w{w['n']} has uncommitted changes; told the worker to commit")
@@ -318,7 +443,7 @@ def cmd_merge(args):
     if not ok:
         state.event(conn, hive["id"], "conflict", {"files": out}, w["id"])
         state.update(conn, "workers", w["id"], status="fixing")
-        sys_send(hive, R.worker_handle(hive["name"], w["n"]), "conflict",
+        sys_send(hive, bus.worker_handle(hive["name"], w["n"]), "conflict",
                  f"Merge into {hive['branch']} conflicted (merge aborted). Run `git rebase {hive['branch']}`, "
                  f"resolve, run the tests, and report again.\nConflicted files:\n{out}",
                  worker=w["n"], task=str(w["id"]))
@@ -326,6 +451,7 @@ def cmd_merge(args):
         return 5
     remove_worker(conn, hive, w, "merged", force_branch=False, merged_into=hive["branch"])
     state.event(conn, hive["id"], "merge", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "merge", hive=hive)
     print(f"merged w{w['n']} into {hive['branch']}; pane, worktree and branch removed")
     return 0
 
@@ -342,6 +468,7 @@ def cmd_discard(args):
             return 1
     remove_worker(conn, hive, w, "discarded", force_branch=True)
     state.event(conn, hive["id"], "discard", {"n": w["n"]}, w["id"])
+    _route_outcome(w["id"], "discard", hive=hive)
     print(f"discarded w{w['n']}")
     return 0
 
@@ -388,7 +515,7 @@ def cmd_close(args):
             return 1
     for w in live:
         remove_worker(conn, hive, w, "discarded", force_branch=True)
-    R.part(R.brain_handle(hive["name"]), workspace=hive["workspace_id"])
+    bus.part(bus.brain_handle(hive["name"]), workspace=hive["workspace_id"])
     state.update(conn, "hives", hive["id"], status="closed")
     state.event(conn, hive["id"], "close", {})
     print(f"hive {hive['name']} closed; the hive worktree {hive['worktree']} is kept")
@@ -430,11 +557,47 @@ def cmd_bench(args):
 
 # --- hooks / reconcile ---------------------------------------------------------------
 
-def cmd_hook(args):
-    if args.event != "workspace-created":
-        return 0
-    cfg = config.load()
-    if not cfg.auto_open:
+def _hook_bus(event: str) -> None:
+    """Flush on agent idle / focus change. Runs on every pane event, so it
+    stays fast: no DB open without a reason, and it never raises."""
+    try:
+        from . import bus
+        if not (state.STATE_DIR / "hive.db").exists():
+            return
+        ev = {}
+        try:
+            ev = json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON") or "{}")
+        except json.JSONDecodeError:
+            pass
+        status = find_key(ev, "agent_status") if event == "agent-status" else None
+        if event == "agent-status":  # only an idle agent can take a prompt
+            if status not in ("idle", "done"):
+                return
+            pane = find_key(ev, "pane_id")
+            if not pane:
+                return
+        else:
+            pane = None
+        conn = state.connect()
+        try:
+            if event == "agent-status":
+                row = conn.execute(
+                    "SELECT 1 FROM messages WHERE status='pending' AND target IN"
+                    " (SELECT name FROM handles WHERE pane_id=?) LIMIT 1", (pane,)).fetchone()
+            else:
+                row = conn.execute("SELECT 1 FROM messages WHERE status='pending' LIMIT 1").fetchone()
+            if not row:
+                return
+            bus.flush(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"hive: hook: {e}", file=sys.stderr)
+
+
+def _auto_open_new_hive():
+    """The workspace-created hook body: offer a hive for a plain git workspace."""
+    if not config.load().auto_open:
         return 0
     ev = {}
     try:
@@ -469,6 +632,15 @@ def cmd_hook(args):
     return open_hive(top, ws, close_ws=ws)
 
 
+def cmd_hook(args):
+    if args.event == "workspace-created":
+        return _auto_open_new_hive()
+    if args.event in ("agent-status", "pane-focused"):
+        _hook_bus(args.event)
+        return 0
+    return 0
+
+
 def cmd_reconcile(args):
     """Mark orphans failed after a herdr restart (spec Q6)."""
     conn = state.connect()
@@ -489,6 +661,16 @@ def cmd_reconcile(args):
                 state.update(conn, "workers", w["id"], status="failed")
                 state.event(conn, h["id"], "orphan", {"n": w["n"]}, w["id"])
                 changed += 1
+    for row in conn.execute(
+        "SELECT handles.name AS name, handles.pane_id AS pane_id FROM handles"
+        " JOIN hives ON hives.id=handles.hive_id WHERE hives.status='open'"
+    ).fetchall():
+        if row["pane_id"] in panes:
+            continue
+        conn.execute("UPDATE messages SET status='failed' WHERE target=? AND status='pending'",
+                     (row["name"],))
+        bus.part(row["name"], conn=conn)
+        changed += 1
     if not args.quiet:
         print(f"reconciled: {changed} orphan(s) marked failed")
     return 0
@@ -510,7 +692,10 @@ def register(sub) -> None:
     s = sub.add_parser("new", help="open a hive (branch -> worktree -> brain)")
     s.add_argument("--cwd"); s.set_defaults(func=cmd_new)
     s = sub.add_parser("spawn", help="spawn a worker for a task file")
-    s.add_argument("--task-file", required=True); s.add_argument("--title"); s.set_defaults(func=cmd_spawn)
+    s.add_argument("--task-file", required=True); s.add_argument("--title")
+    s.add_argument("--tier", choices=["fast", "regular", "think"], default=None,
+                   help="skip the router and force a tier")
+    s.set_defaults(func=cmd_spawn)
     s = sub.add_parser("fix", help="send a fix task to a worker")
     s.add_argument("worker"); s.add_argument("text", nargs="*"); s.add_argument("--task-file")
     s.set_defaults(func=cmd_fix)
@@ -533,6 +718,31 @@ def register(sub) -> None:
     s = sub.add_parser("hook", help="internal"); s.add_argument("event"); s.set_defaults(func=cmd_hook)
     s = sub.add_parser("reconcile", help="mark orphans failed"); s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_reconcile)
+    register_router(sub)
+
+
+def register_router(sub, name="router") -> None:
+    """`hive router` subcommands (routing step 1)."""
+    from . import router
+    s = sub.add_parser(name, help="local decision-model router (setup | serve | ask | ping)")
+    rs = s.add_subparsers(dest="router_cmd", required=True)
+    c = rs.add_parser("setup", help="install router deps and download the model files (one time)")
+    c.add_argument("--dest", default=None, dest="dest")
+    c.set_defaults(func=router.cmd_router_setup)
+    c = rs.add_parser("serve", help="serve the router on a local Unix socket")
+    c.set_defaults(func=router.cmd_router_serve)
+    c = rs.add_parser("ask", help="ask the router to pick a tier for a task file")
+    c.add_argument("--task-file", required=True)
+    c.add_argument("--title", default=None)
+    c.add_argument("--timeout", default="2")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=router.cmd_router_ask)
+    c = rs.add_parser("ping", help="check that the router server answers")
+    c.set_defaults(func=router.cmd_router_ping)
+    c = rs.add_parser("export", help="write retraining rows (choice format) from the route log")
+    c.add_argument("--since", default=None, help="YYYY-MM-DD, cases from this date on")
+    c.add_argument("--out", default=None, help="output file (default $HIVE_STATE_DIR/route_log/export.jsonl)")
+    c.set_defaults(func=router.cmd_router_export)
 
 
 def argparse_remainder():

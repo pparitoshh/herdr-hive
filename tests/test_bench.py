@@ -25,13 +25,13 @@ class BenchTest(unittest.TestCase):
                          title="fix it", status="reported")
         state.add_worker(self.conn, hive_id=hid, n=2, branch="hive/hv/w2", title="old", status="merged")
         self.sent = []
-        self.orig = (bench.radio_send, bench.load_worker_diff, bench.load_total_diff)
-        bench.radio_send = lambda to, type_, hive, text, **kw: self.sent.append((to, type_, text, kw)) or "ok"
+        self.orig = (bench.bus_send, bench.load_worker_diff, bench.load_total_diff)
+        bench.bus_send = lambda to, type_, hive, text, **kw: self.sent.append((to, type_, text, kw)) or "ok"
         bench.load_worker_diff = lambda *a: DIFF
         bench.load_total_diff = lambda *a: ""
 
     def tearDown(self):
-        bench.radio_send, bench.load_worker_diff, bench.load_total_diff = self.orig
+        bench.bus_send, bench.load_worker_diff, bench.load_total_diff = self.orig
 
     def run_keys(self, keys, before=None):
         async def go():
@@ -67,12 +67,12 @@ class BenchTest(unittest.TestCase):
             self.assertEqual(text, "a.py:2\nnit")
             self.assertEqual(kw["sender"], "bench.hv")
 
-    def test_radio_failure_does_not_crash(self):
+    def test_bus_failure_does_not_crash(self):
         def boom(*a, **k):
-            raise RuntimeError("no radio")
-        bench.radio_send = boom
+            raise RuntimeError("no bus")
+        bench.bus_send = boom
         app = self.run_keys(["a"])
-        self.assertIn("radio error", app.last_status)
+        self.assertIn("bus error", app.last_status)
 
 
 if __name__ == "__main__":

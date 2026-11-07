@@ -31,6 +31,39 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.parse_duration("30m"), 1800)
         self.assertEqual(config.parse_duration("5"), 5)
 
+    def test_tier_defaults(self):
+        d = Path(tempfile.mkdtemp())
+        cfg = config.load(path=d / "h.toml")
+        self.assertEqual(set(cfg.tiers), {"fast", "regular", "think"})
+        fast = cfg.tiers["fast"]
+        self.assertEqual((fast.harness, fast.model), ("opencode", "opencode-go/qwen3.8-flash"))
+        self.assertEqual(cfg.tiers["regular"].harness, "claude")
+        self.assertEqual(cfg.tiers["regular"].model, "claude-haiku-5-5")
+        self.assertEqual(cfg.tiers["think"].model, "opencode-go/glm-5.3-flash")
+        for t in cfg.tiers.values():
+            self.assertTrue(t.description.strip(), t.name)
+        self.assertIsInstance(cfg.tiers["fast"], config.Tier)
+
+    def test_tier_override_and_routing(self):
+        d = Path(tempfile.mkdtemp())
+        repo = d / "repo"; repo.mkdir()
+        g = d / "h.toml"
+        g.write_text("[harness.claude]\nlabel = \"C\"\ncommand = [\"claude\"]\n")  # old global file without [tiers] and [routing]
+        cfg = config.load(repo, path=g)
+        self.assertEqual(set(cfg.tiers), {"fast", "regular", "think"})
+        self.assertEqual((cfg.routing.mode, cfg.routing.min_confidence, cfg.routing.idle_exit, cfg.routing.timeout_s),
+                         ("auto", 0.4, 1800, 2))
+        self.assertEqual(cfg.routing.save_cases, True)  # the retrain log is on by default
+        (repo / ".hive.toml").write_text(
+            '[tiers.think]\nharness = "claude"\nmodel = "claude-opus-5-5"\n'
+            'description = "hard"\n\n[routing]\nmode = "ask"\nmin_confidence = 0.6\nidle_exit = "5m"\ntimeout_s = 1\n')
+        cfg = config.load(repo, path=g)
+        self.assertEqual((cfg.tiers["think"].harness, cfg.tiers["think"].model), ("claude", "claude-opus-5-5"))
+        self.assertEqual(cfg.tiers["think"].description, "hard")
+        self.assertEqual(cfg.tiers["fast"].model, config.TIERS["fast"].model)
+        r = cfg.routing
+        self.assertEqual((r.mode, r.min_confidence, r.idle_exit, r.timeout_s), ("ask", 0.6, 300, 1))
+
     def test_state(self):
         c = state.connect(Path(tempfile.mkdtemp()) / "x.db")
         hid = state.add_hive(c, name="h", worktree="/tmp/h")

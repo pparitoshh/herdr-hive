@@ -2,7 +2,7 @@ id = "pparitoshh.hive"
 name = "Herdr Hive"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "One brain and N workers per workspace, each in its own git worktree, talking over AgentRadio, with a review bench."
+description = "One brain and N workers per workspace, each in its own git worktree, talking over a local message bus, with a review bench."
 platforms = ["linux", "macos"]
 
 [[build]]
@@ -29,9 +29,23 @@ title = "Hive: open review bench"
 contexts = ["workspace"]
 command = ["bin/hive", "bench", "--open"]
 
+[[actions]]
+id = "router-setup"
+title = "Hive: router setup"
+contexts = ["workspace"]
+command = ["bin/hive", "router", "setup"]
+
 [[events]]
 on = "workspace.created"
 command = ["bin/hive", "hook", "workspace-created"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bin/hive", "hook", "agent-status"]
+
+[[events]]
+on = "pane.focused"
+command = ["bin/hive", "hook", "pane-focused"]
 
 [[panes]]
 id = "picker"
