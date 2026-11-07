@@ -37,6 +37,27 @@ models_command = ["opencode", "models"]
 herdr_kind = "opencode"
 headless_args = ["run"]
 
+[tiers.fast]
+harness = "opencode"
+model   = "opencode-go/qwen3.8-flash"
+description = "Short and simple edits: one or two files, a clear change, no design"
+
+[tiers.regular]
+harness = "claude"
+model   = "claude-haiku-5-5"
+description = "Normal coding work: a clear feature or bug fix, several files, tests"
+
+[tiers.think]
+harness = "opencode"
+model   = "opencode-go/glm-5.3-flash"
+description = "Long or hard work: design, debugging, many files, unclear goal"
+
+[routing]
+mode = "auto"            # auto | ask | fixed
+min_confidence = 0.5     # below this, the human picks the tier
+idle_exit = "30m"        # the router server exits after this idle time
+timeout_s = 2            # max wait for one router request
+
 [review]
 harnesses = ["claude", "opencode"]
 """
@@ -78,6 +99,33 @@ class Harness:
 
 
 @dataclass
+class Tier:
+    name: str
+    harness: str
+    model: str
+    description: str
+
+
+# Built-in tiers. An old global harnesses.toml has no [tiers], so `load` fills them in.
+TIERS = {
+    "fast": Tier("fast", "opencode", "opencode-go/qwen3.8-flash",
+                 "Short and simple edits: one or two files, a clear change, no design"),
+    "regular": Tier("regular", "claude", "claude-haiku-5-5",
+                    "Normal coding work: a clear feature or bug fix, several files, tests"),
+    "think": Tier("think", "opencode", "opencode-go/glm-5.3-flash",
+                  "Long or hard work: design, debugging, many files, unclear goal"),
+}
+
+
+@dataclass
+class Routing:
+    mode: str = "auto"
+    min_confidence: float = 0.5
+    idle_exit: int = 1800
+    timeout_s: int = 2
+
+
+@dataclass
 class Config:
     max_workers: int = 3
     base_branch: str = "main"
@@ -86,6 +134,8 @@ class Config:
     ask_timeout: str = "30m"
     harnesses: dict[str, Harness] = field(default_factory=dict)
     review_harnesses: list[str] = field(default_factory=list)
+    tiers: dict[str, Tier] = field(default_factory=dict)
+    routing: Routing = field(default_factory=Routing)
 
     def harness(self, name: str) -> Harness:
         try:
@@ -150,4 +200,19 @@ def load(repo: Path | None = None, path: Path | None = None) -> Config:
             models_command=list(h.get("models_command", [])),
         )
     cfg.review_harnesses = [n for n in data.get("review", {}).get("harnesses", []) if n in cfg.harnesses]
+    for name, t in data.get("tiers", {}).items():
+        d = TIERS.get(name)
+        cfg.tiers[name] = Tier(name=name,
+                               harness=str(t.get("harness", d.harness if d else "opencode")),
+                               model=str(t.get("model", d.model if d else "")),
+                               description=str(t.get("description", d.description if d else "")))
+    for name, t in TIERS.items():  # old toml without [tiers] still gets the defaults
+        if name not in cfg.tiers:
+            cfg.tiers[name] = t
+    r = data.get("routing", {})
+    idle = r.get("idle_exit", 1800)
+    cfg.routing = Routing(mode=str(r.get("mode", "auto")),
+                          min_confidence=float(r.get("min_confidence", 0.5)),
+                          idle_exit=parse_duration(idle) if isinstance(idle, str) else int(idle),
+                          timeout_s=int(r.get("timeout_s", 2)))
     return cfg

@@ -29,6 +29,12 @@ title = "Hive: open review bench"
 contexts = ["workspace"]
 command = ["bin/hive", "bench", "--open"]
 
+[[actions]]
+id = "router-setup"
+title = "Hive: router setup"
+contexts = ["workspace"]
+command = ["bin/hive", "router", "setup"]
+
 [[events]]
 on = "workspace.created"
 command = ["bin/hive", "hook", "workspace-created"]
