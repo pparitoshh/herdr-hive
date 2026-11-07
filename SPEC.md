@@ -81,12 +81,62 @@ herdr_kind = "opencode"
 
 [review]                          # optional AI review key in bench
 harnesses = ["claude", "opencode"]
+
+[tiers.fast]                      # the router model reads description
+harness = "opencode"
+model   = "opencode-go/qwen3.8-flash"
+description = "Short and simple edits: one or two files, a clear change, no design"
+
+[tiers.regular]
+harness = "claude"
+model   = "claude-haiku-5-5"
+description = "Normal coding work: a clear feature or bug fix, several files, tests"
+
+[tiers.think]
+harness = "opencode"
+model   = "opencode-go/glm-5.3-flash"
+description = "Long or hard work: design, debugging, many files, unclear goal"
+
+[routing]
+mode = "auto"            # auto | ask | fixed
+min_confidence = 0.4     # below this, the human picks the tier
+idle_exit = "30m"        # the router server exits after this idle time
+timeout_s = 2            # max wait for one router request
+save_cases = true        # write the retrain log; $HIVE_SAVE_CASES=0 turns it off
 ```
 
 ### 4.2 Per-repo override: `<repo>/.hive.toml` (optional)
-Same schema. Keys are merged over the global file (`max_workers`, `base_branch`, allowed harnesses/models).
+Same schema. Keys are merged over the global file (`max_workers`, `base_branch`, allowed harnesses/models,
+`[tiers.*]`, `[routing]`).
 
-### 4.3 `<repo>/.worktreeinclude`
+### 4.3 Worker tiers and routing
+The tier sets the harness and the model for a spawned worker; the human does not pick them. The spawn flow
+depends on `routing.mode`:
+
+| Mode | Behaviour |
+|---|---|
+| `auto` | The router picks the tier when the confidence reaches `min_confidence`. <!-- min_confidence: set by step 2b --> Below that, or on a router failure or timeout, the human picks in a popup (3 tier choices, the router pick first, reason + probabilities). No silent default; cancel declines the spawn. |
+| `ask` | The popup always asks, with the router pick first. |
+| `fixed` | No router; the human picks harness and model. |
+
+`hive spawn --tier <name>` skips the router. The tier decision is local: the decision model (Open Decision
+Model 150M, ONNX) runs in a local server that answers on the Unix socket `$HIVE_STATE_DIR/router.sock`
+(mode 0600, no HTTP endpoint). It uses 2 threads and exits after `routing.idle_exit`.
+
+### 4.4 Retrain log (on by default)
+`routing.save_cases` is `true`: `hive` appends the retrain log. `$HIVE_SAVE_CASES=0` or `save_cases = false`
+in `[routing]` turns it off; `hive` then writes nothing and creates no `route_log/` directory. When it is on:
+
+- Path: `$HIVE_STATE_DIR/route_log/YYYY-MM-DD.jsonl`.
+- One case line per spawn the router did not decide (human pick, confidence below `min_confidence`,
+  router failure). The line carries the exact request texts (`state`, `instructions`, `options`) so it can
+  become one training row without rebuilding.
+- One `{"type":"outcome", "worker_id", "ts", "outcome"}` line per merge, discard and fix. Append only;
+  `hive router export` joins the last outcome per worker id.
+- `hive router export [--since F] [--out F]` writes `{state, instructions, options, label}` rows in
+  decision-model `choice` format. Label = `human_pick`, else `final_tier` when the outcome is `merge`.
+
+### 4.5 `<repo>/.worktreeinclude`
 Gitignore-syntax list of ignored files to copy into every new hive or worker worktree (`.env`, `settings.local.json`, …). Copies come from the primary checkout.
 
 ---
@@ -132,16 +182,19 @@ Steps:
 8. Write the hive record to the state DB (§9).
 
 ### 6.2 Spawn worker (brain-initiated)
-1. Brain runs `hive spawn --task-file <path> [--title "..."]`.
+1. Brain runs `hive spawn --task-file <path> [--title "..."]`. `--tier <name>` skips the router.
 2. `hive` checks `max_workers` and refuses with a clear message if the hive is already at the cap.
-3. Popup picker for the human: worker harness → model. The human can cancel, and the brain is told it was declined.
+3. The tier comes from the router (§4.3, §4.4). The human picks in the popup only when the router's
+   confidence is low, the router is down, or the mode is `ask`. The human can always cancel.
 4. `git worktree add <root>/<repo>/<hive>-w<N> -b <hive-branch>/w<N> <hive-branch>`.
    - Uses plain git, **not** `herdr worktree create`, so herdr doesn't open a separate workspace for the worker.
 5. Copy the `.worktreeinclude` files.
 6. Split a pane in the `hive` tab (§5) with `--cwd` set to the worker worktree.
-7. `hive` binds the handle `w<N>.<hive>` to the pane and starts the harness with the chosen model and `auto_approve_args`.
+7. `hive` binds the handle `w<N>.<hive>` to the pane and starts the tier's harness with the tier's model and
+   `auto_approve_args`.
 8. Inject the worker role prompt (§8.2), then send a `task` message that references the task file in `Ref:`.
-9. State: worker `running`.
+9. State: worker `running`, with `tier` and `route_json`, a `route` event, and (when `save_cases` is on) a
+   retrain-log case line.
 
 ### 6.3 Worker report → review → merge
 1. The worker commits on its branch, then sends `report` to the brain (summary, commits, tests run, open issues).
@@ -190,6 +243,8 @@ On the "Workspace total" view, comments go to the brain (it has no worker owner)
 
 ### 8.1 Brain
 - You are the BRAIN of hive `<hive>` on branch `<b>`. **Don't edit files or run builds.**
+- **Don't pick harnesses or models for workers.** The router picks the tier; the tier sets harness and model
+  (§4.3). Use `--tier` only with a strong reason (a known-hard task, or a router that clearly misread one).
 - Tools: `hive spawn|status|merge|finish|discard` and `hive msg|inbox|show`. `hive status` also lists the live handles.
 - Loop: split the goal into small tasks that can be tested → spawn workers (at most `max_workers` at once) → wait for pushed messages → review → fix or merge → repeat.
 - Human verdicts and AI reviews are advisory, and the final decision is yours. Mention any rejected verdict in your report.
@@ -210,15 +265,26 @@ SQLite at `$(herdr plugin state-dir hive)/hive.db`. A new tool has to be able to
 
 ```
 hives(id, repo, branch, base, worktree, workspace_id, brain_pane, brain_harness, brain_model, status, created_at)
-workers(id, hive_id, n, branch, worktree, pane_id, harness, model, title, task_ref, status, created_at, merged_at)
+workers(id, hive_id, n, branch, worktree, pane_id, harness, model, title, task_ref, status, tier, route_json,
+        created_at, merged_at)
    status: spawning | running | reported | fixing | merged | discarded | failed
-events(id, hive_id, worker_id, kind, payload_json, ts)   -- audit log (spawn, merge, conflict, verdict, ask)
+   tier:      the tier name for this spawn ("-" in `hive status` when unset)
+   route_json: JSON {probs: {tier: p}, confidence, decided_by: router | human | flag}, from one spawn
+events(id, hive_id, worker_id, kind, payload_json, ts)   -- audit log
+   kind includes: spawn (n, harness, model, title, tier), route (tier, decided_by, confidence, probs),
+   spawn_refused, spawn_declined, spawn_failed, fix, merge, discard, conflict, verdict, ask.
 handles(hive_id, name, pane_id, created_at)
 messages(id, hive_id, sender, target, body, ref, reply_required, status, attempts, created_at, delivered_at)
    status: pending | delivered | failed
 ```
 
+The outcome updates from merge/discard/fix live in the retrain log (§4.4), not in the `events` table.
+
 The state dir has mode 0700 and all files in it have mode 0600. `hive` sets `umask 077` at start.
+
+### 9.1 Retrain log contents
+See §4.4. Case lines carry `repo`, `worker_id`, the request texts, `probs`, `router_pick`, `confidence`,
+`reason`, `human_pick`, `final_tier` and `outcome: null` until the outcome line for that worker lands.
 
 ---
 
@@ -285,6 +351,9 @@ herdr-hive/
 ├── hive/
 │   ├── config.py            # harnesses.toml + .hive.toml merge
 │   ├── state.py             # sqlite
+│   ├── router.py            # local ONNX decision model: download, encode, serve, ask, export
+│   ├── takeover.py          # who decides the tier: router or picker (Route)
+│   ├── routelog.py          # retrain log (off by default) and `hive router export` rows
 │   ├── git_ops.py           # worktree add/remove, merge, diff
 │   ├── herdr_ops.py         # wraps $HERDR_BIN_PATH (pane split, tab, toast, plugin pane open)
 │   ├── bus.py               # SQLite message bus (send, flush, hooks)
@@ -357,9 +426,10 @@ command = ["bin/hive", "bench"]
 hive new | close | status [--json]
 hive msg <handle> 'text' [--ref F] [--reply-required]
 hive inbox | show <id>
-hive spawn --task-file F [--title T]
+hive spawn --task-file F [--title T] [--tier <name>]
 hive merge wN | discard wN | finish
 hive ask --prompt P --choices a,b,c [--timeout 30m]
+hive router setup | serve | ask | ping | export
 hive picker            # popup entrypoint (internal)
 hive bench [--open]
 hive hook <event>      # agent-status, pane-focused, workspace-created (internal)

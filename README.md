@@ -47,7 +47,8 @@ description = "new hive"
 1. In a workspace of a git repo, run the action `pparitoshh.hive.new` (key or command palette).
 2. Pick or type a branch. herdr opens a new worktree workspace for it.
 3. Pick the brain harness and model. The brain starts in tab `hive`. The bench opens in tab `review`.
-4. Give the brain a goal. The brain writes task files and runs `hive spawn`. For each worker, you pick the harness and model in a popup.
+4. Give the brain a goal. The brain writes task files and runs `hive spawn`. The router picks the tier for each
+   worker; you confirm in a popup only when the tier is unclear.
 5. Workers commit and send a `report`. The brain reviews and runs `hive merge wN` or `hive fix wN`.
 6. The brain runs `hive finish`. You pick **Push**, **Push + PR (gh)** or **Nothing**.
 
@@ -59,8 +60,9 @@ hive status [--json] [--all]    who is where
 hive msg <handle> 'text' [--ref F] [--reply-required]
 hive inbox                      messages for this pane's handle
 hive show <id>                  print one message again
-hive spawn --task-file F [--title T]
+hive spawn --task-file F [--title T] [--tier fast|regular|think]
 hive fix wN --task-file F | TEXT
+hive router setup | serve | ask | ping | export
 hive merge wN
 hive discard wN [--yes]
 hive finish [--choice ...]
@@ -137,10 +139,51 @@ The envelope format and the busy-hold idea come from AgentRadio (detailles/Agent
 PYTHONPATH=. ~/.local/state/herdr-hive/venv/bin/python -m unittest discover -s tests -v
 ```
 
-## Router (routing step 1)
+## Worker tiers and routing
 
-`hive router` picks the worker tier with a local decision model. No HTTP
-endpoint and no network at run time.
+The brain gives only the task. A local router picks the worker tier. The tier
+sets the harness and the model for the worker. You never pick a harness or a
+model for a worker; the brain never picks one either.
+
+The tiers come from config (`[tiers.*]` in `harnesses.toml` or `.hive.toml`).
+The defaults:
+
+| Tier | Harness / model | Use |
+|---|---|---|
+| `fast` | opencode / `opencode-go/qwen3.8-flash` | Short and simple edits: one or two files, a clear change, no design |
+| `regular` | claude / `claude-haiku-5-5` | Normal coding work: a clear feature or bug fix, several files, tests |
+| `think` | opencode / `opencode-go/glm-5.3-flash` | Long or hard work: design, debugging, many files, unclear goal |
+
+The tier `description` is the option text the router model reads. Tune it in
+config, not in code.
+
+How the router decides:
+
+- The model runs only on this machine. There is no HTTP endpoint and no
+  network call at run time.
+- `hive router serve` loads the ONNX model once and answers on the Unix socket
+  `$HIVE_STATE_DIR/router.sock` in mode 0600. No TCP port.
+- The server uses 2 ONNX threads and exits after 30 idle minutes, so it uses
+  no memory while hive is not in use.
+- Measured on one machine (3-option question, after warm-up): model load about
+  3 s, p50 about 140 ms, p95 about 150 ms, server RSS about 620 MB.
+
+How a spawn picks the tier (`routing.mode` in config):
+
+| Mode | Behaviour |
+|---|---|
+| `auto` (default) | The router picks the tier when its confidence reaches `routing.min_confidence`. <!-- min_confidence: set by step 2b --> Below that, or when the router is down or times out, the human picks in the popup: three tier choices, the router pick first, the reason and the probabilities in the prompt. There is no silent default tier. Cancel stops the spawn. |
+| `ask` | The popup always asks, with the router pick first. |
+| `fixed` | No router. The old flow: the human picks harness and model. |
+
+`hive spawn --tier fast|regular|think` skips the router. The brain may add
+`--tier` only with a strong reason (see `hive/roles/brain.md`).
+
+Each spawn stores `tier` and `route_json` (probs, confidence, decided_by =
+router | human | flag) on the worker row, writes a `route` event, and shows
+the tier in `hive status`.
+
+Router commands:
 
 ```bash
 hive router setup            # install deps, download the model files (one time)
@@ -150,21 +193,15 @@ hive router export [--since D] [--out F]  # retraining rows (choice format) from
 hive router ping             # check the server
 ```
 
-`hive spawn` reads `tiers` and `routing` from config. The router picks the
-tier when its confidence reaches `routing.min_confidence`; below that (or when
-the deps, model files or server are missing) the human picks in the popup,
-with the router pick first and the probabilities in the prompt. The human can
-always decide with `--tier fast|regular|think`. Each spawn writes the `tier`,
-`route_json` and a `route` event; spawns the router did not decide (human pick,
-low confidence, router failure) land in `$HIVE_STATE_DIR/route_log/YYYY-MM-DD.jsonl`,
-and merge/discard/fix append one outcome line each.
-
-No `pyproject.toml` exists here, so the optional deps list replaces the extra
-`hive[router]`:
+`herdr-plugin.toml` registers the action **Hive: router setup** for the
+`workspace` context. It runs `bin/hive router setup`: it installs `onnxruntime`,
+`tokenizers` and `numpy` into the plugin venv and downloads the model files one
+time. There is no `pyproject.toml` here, so the optional deps list replaces the
+extra `hive[router]`:
 
 | Dependency | Installed by | Used for |
 |---|---|---|
-| `onnxruntime` | `hive router setup` (into the plug venv) | The ONNX session |
+| `onnxruntime` | `hive router setup` (into the plugin venv) | The ONNX session |
 | `tokenizers` | `hive router setup` | Token ids and spans |
 | `numpy` | `hive router setup` | Masks and softmax |
 
@@ -173,13 +210,77 @@ Model files land in `~/.cache/herdr-hive/decision-model/`
 from `gparitosh007/Open-Decision-Model-150M-ONNX`). The download shows progress
 and skips existing files. `$HIVE_DECISION_MODEL_DIR` moves the cache.
 `$HIVE_ROUTER_MODEL_FILE` overrides the file pick.
+The fp32 copy measured slower and heavier (p50 162 ms, RSS 942 MB); int8
+quantization does not load for this graph, so `serve` loads `model_fp16.onnx`.
 
-Measured on this machine (one server process, `intra_op_num_threads = 2`):
-model load about 3 s, p50 138 ms, p95 152 ms for one 3-option question over
-the Unix socket, server RSS about 620 MB. The fp32 copy measured slower and
-heavier (p50 162 ms, RSS 942 MB); int8 quantization does not load for this
-graph. When the deps or files are missing, the server does not start and the
-call fails with a reason (step 2 adds the human takeover).
+## Retrain log
+
+The retrain log collects the routing cases you can retrain the decision model
+on. It is ON by default (`routing.save_cases = true`): `hive` appends
+`$HIVE_STATE_DIR/route_log/YYYY-MM-DD.jsonl` (one file per local day;
+`$HIVE_STATE_DIR` is `~/.local/state/herdr-hive` by default).
+
+Turn it off for one repo in `<repo>/.hive.toml`:
+
+```toml
+[routing]
+save_cases = false
+```
+
+Or once for the machine with `HIVE_SAVE_CASES=0` in the environment. With the
+log off, `hive` writes nothing and creates nothing; `hive router export`
+still works on old files and prints 0 rows when there are none.
+
+`hive` appends one case line per spawn when the router did not decide:
+
+- the human picked the tier (low confidence, router failure, `routing.mode = ask`),
+- or the confidence stayed below `routing.min_confidence` while the router
+  still had probabilities.
+<!-- min_confidence: set by step 2b -->
+
+A case line holds:
+
+```json
+{"ts", "worker_id", "repo", "title", "task_text" (first 2000 chars),
+ "state_features": {"title", "file_count", "task_chars"},
+ "state", "instructions",
+ "options": {tier: description}, "probs", "router_pick", "confidence",
+ "reason", "human_pick", "final_tier", "outcome": null}
+```
+
+`state` and `instructions` are the exact texts of the request, so an export row
+reproduces it. A high-confidence router decision is not logged: no human saw it,
+and it has no label.
+
+On `merge`, `discard` or `fix`, `hive` appends one outcome line instead of
+rewriting the case line (append is safe across processes; the simpler schema of
+the two in the plan wins):
+
+```json
+{"type": "outcome", "worker_id": 7, "ts": 1762000000.0, "outcome": "merge"}
+```
+
+`hive router export [--since YYYY-MM-DD] [--out F]` writes training rows, one
+per case that has a label:
+
+```json
+{"state": "...", "instructions": "...", "options": {"fast": "..."}, "label": "think"}
+```
+
+Label rules: use `human_pick` when the human picked a tier; otherwise use
+`final_tier` when the last outcome line for that worker is `merge`. Rows
+without a label are skipped. `--since` filters the case dates; outcome lines
+join in from all dates.
+
+Daily retrain example (cron line):
+
+```
+# export the routing cases once a day at 05:15
+15 5 * * * /path/to/herdr-hive/bin/hive router export --out $HOME/.cache/herdr-hive/retrain/latest.jsonl
+```
+
+Import `latest.jsonl` into your retrain pipeline and train the decision model
+on it; then swap the model file in `~/.cache/herdr-hive/decision-model/`.
 
 ## License
 
