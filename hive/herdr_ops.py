@@ -55,6 +55,14 @@ def pane_get(pane: str) -> dict | None:
         return None
 
 
+def pane_state(pane: str) -> dict | None:
+    """Agent status and focus of a pane; None if the pane is gone."""
+    p = pane_get(pane)
+    if p is None:
+        return None
+    return {"agent_status": p.get("agent_status"), "focused": bool(p.get("focused"))}
+
+
 def workspace_get(ws: str) -> dict | None:
     try:
         return call("workspace", "get", ws).get("workspace")

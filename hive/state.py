@@ -20,15 +20,28 @@ CREATE TABLE IF NOT EXISTS workers(
   status TEXT DEFAULT 'spawning', created_at REAL, merged_at REAL, UNIQUE(hive_id, n));
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, hive_id INTEGER, worker_id INTEGER, kind TEXT, payload_json TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS handles(
+  hive_id INTEGER, name TEXT, pane_id TEXT, created_at REAL,
+  PRIMARY KEY(hive_id, name));
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY, hive_id INTEGER, sender TEXT, target TEXT,
+  body TEXT, ref TEXT, reply_required INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+  created_at REAL, delivered_at REAL);
 """
 
 LIVE = ("spawning", "running", "reported", "fixing")
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
-    path = path or STATE_DIR / "hive.db"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = Path(path) if path else STATE_DIR / "hive.db"
+    if path.parent == STATE_DIR:  # never chmod a directory we do not own
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+    os.chmod(path, 0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
