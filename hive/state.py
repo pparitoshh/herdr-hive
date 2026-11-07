@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS hives(
 CREATE TABLE IF NOT EXISTS workers(
   id INTEGER PRIMARY KEY, hive_id INTEGER REFERENCES hives(id), n INTEGER, branch TEXT, worktree TEXT,
   pane_id TEXT, harness TEXT, model TEXT, title TEXT, task_ref TEXT,
-  status TEXT DEFAULT 'spawning', created_at REAL, merged_at REAL, UNIQUE(hive_id, n));
+  status TEXT DEFAULT 'spawning', tier TEXT, route_json TEXT,
+  created_at REAL, merged_at REAL, UNIQUE(hive_id, n));
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, hive_id INTEGER, worker_id INTEGER, kind TEXT, payload_json TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS handles(
@@ -32,6 +33,18 @@ CREATE TABLE IF NOT EXISTS messages(
 
 LIVE = ("spawning", "running", "reported", "fixing")
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS does not add
+# them to an existing table, so `connect` runs an ALTER TABLE migration.
+_ADDED_COLUMNS = {"workers": {"tier": "TEXT", "route_json": "TEXT"}}
+
+
+def _migrate(conn) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in cols.items():
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = Path(path) if path else STATE_DIR / "hive.db"
@@ -45,6 +58,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

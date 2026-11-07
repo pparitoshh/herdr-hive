@@ -49,7 +49,7 @@ def cmd_status(args) -> int:
         print(f"hive {h['name']}  branch={h['branch']}  base={h['base']}  brain={h['brain_harness']}/{h['brain_model']}  pane={h['brain_pane']}")
         print(f"  worktree {h['worktree']}")
         for w in h["workers"]:
-            print(f"  w{w['n']:<3} {w['status']:<10} {w['harness']}/{w['model']}  pane={w['pane_id']}  {w['title'] or ''}")
+            print(f"  w{w['n']:<3} {w['status']:<10} tier={w['tier'] or '-':<7} {w['harness']}/{w['model']}  pane={w['pane_id']}  {w['title'] or ''}")
     return 0
 
 

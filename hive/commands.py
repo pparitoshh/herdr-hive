@@ -86,12 +86,22 @@ def find_key(obj, key):
     return None
 
 
-def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str):
-    """Bus join (handle only) -> start harness in the pane -> inject the role prompt."""
+def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str,
+                 worktree: str | None = None):
+    """Bus join (handle only) -> start harness in the pane -> inject the role prompt.
+
+    A worker needs TMPDIR=<worktree>/.tmp: OpenCode rejects writes outside the
+    worktree and a /tmp write stopped a run (plan §Worker temp dir).
+    """
     bus.join(handle, pane, workspace=workspace)
     H.pane_rename(pane, handle)
     H.wait_shell(pane)
-    H.pane_run(pane, harness.argv(model, worker=worker))
+    argv = harness.argv(model, worker=worker)
+    if worker and worktree:
+        tmp = Path(worktree) / ".tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        argv = ["env", f"TMPDIR={tmp}", *argv]
+    H.pane_run(pane, argv)
     if not H.wait_agent_ready(pane):
         raise SystemExit(f"hive: {harness.name} did not become ready in pane {pane}")
     H.agent_prompt(pane, role)
@@ -163,6 +173,7 @@ def _open_hive_body(conn, git, root, cfg, branch, name, workspace_for_popup, clo
     wt = str(Path(wt).resolve())
     git.copy_worktreeinclude(root, Path(wt))
     git.add_info_exclude(Path(wt), ".hive/")
+    git.add_info_exclude(Path(wt), ".tmp/")
     if close_ws:
         H.workspace_close(close_ws)
     hm = pick_harness_model(cfg, "brain", workspace=ws)
@@ -238,6 +249,7 @@ def cmd_spawn(args):
     try:
         git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
         git.copy_worktreeinclude(Path(hive["repo"]), wt)
+        git.add_info_exclude(wt, ".tmp/")
         target = live[-1]["pane_id"] if live else hive["brain_pane"]
         direction = "down" if live else "right"
         pane = H.split(target, direction, str(wt), env={"HIVE_NAME": hive["name"]})
@@ -246,7 +258,7 @@ def cmd_spawn(args):
         role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
                          branch=hive["branch"], handle=handle, brain=brain)
         launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
-                     workspace=hive["workspace_id"])
+                     workspace=hive["workspace_id"], worktree=str(wt))
     except Exception as e:
         state.update(conn, "workers", wid, status="failed")
         state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
