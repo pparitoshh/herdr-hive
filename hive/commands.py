@@ -91,7 +91,7 @@ def _route_reason(route, human_reason: str | None, cfg) -> str:
     if route.decided_by == "human":
         return "router failed; human picked" if not route.probs \
             else "human picked with router probabilities"
-    return f"low confidence {route.confidence:.2f} < {cfg.routing.min_confidence:.2f}"
+    return f"low confidence {route.confidence:.3f} < {cfg.routing.min_confidence:.3f}"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -113,9 +113,16 @@ def worker_branch(hive_branch: str, n: int) -> str:
 
 def ask(title: str, prompt: str, choices: list[str], allow_text=False, default=None,
         workspace=None, timeout=None) -> str | None:
-    """Ask the human. Popup when in herdr; terminal prompt otherwise. None means cancelled."""
+    """Ask the human. Popup when in herdr; terminal prompt otherwise. None means cancelled.
+
+    `HIVE_ASK_MODE=plain` forces the numbered terminal prompt, so scripts and
+    live tests can answer without a TUI."""
     req = {"title": title, "prompt": prompt, "choices": choices, "allow_text": allow_text, "default": default}
-    if os.environ.get("HIVE_ASK_MODE") == "inline" or not os.environ.get("HERDR_ENV"):
+    mode = os.environ.get("HIVE_ASK_MODE", "")
+    if mode == "plain":
+        from .picker import ask_plain
+        ans = ask_plain(req)
+    elif mode == "inline" or not os.environ.get("HERDR_ENV"):
         from .picker import ask_inline
         ans = ask_inline(req)
     else:
@@ -312,6 +319,11 @@ def cmd_spawn(args):
     if not task.exists():
         raise SystemExit(f"hive: task file not found: {task}")
     title = args.title or task.stem
+    # The task file must sit inside the hive or worker worktrees (bus.send
+    # refuses it). Check before any git or herdr change: a late failure left a
+    # stray pane and a worker stuck in "spawning".
+    if not bus.ref_ok(conn, hive["id"], str(task)):
+        raise SystemExit(f"hive: task file must live in the hive or a worker worktree: {task}")
     # Tier by router + takeover (plan §Spawn flow). --tier skips the router.
     task_text = task.read_text(errors="replace")
     if args.tier and args.tier not in cfg.tiers:

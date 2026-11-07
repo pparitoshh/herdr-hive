@@ -76,7 +76,7 @@ def decide_tier(task_text, title, tiers: list[str], mode: str, min_confidence: f
         raise ValueError(f"unknown routing mode: {mode}")
     if tier is not None and conf >= min_confidence:
         return Route(tier=tier, probs=probs, confidence=conf, decided_by="router")
-    reason = (f"low confidence {conf:.2f} < {min_confidence:.2f}"
+    reason = (f"low confidence {conf:.3f} < {min_confidence:.3f}"
               if tier is not None else "router gave no tiers")
     answer = ask_human(reason, probs, tier)
     return _human_route(answer, probs)

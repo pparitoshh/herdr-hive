@@ -94,6 +94,9 @@ def log_case(hive, worker_id: int, title: str, task_text: str, request: dict,
     q = request["questions"][0]
     probs = {t: round(float(p), 6) for t, p in route.probs.items()}
     router_pick = max(probs, key=probs.get) if probs else None
+    # A human route leaves route.confidence at 0.0 (takeover.Route); the log
+    # must carry the router's real confidence: the top prob when it has probs.
+    confidence = max(probs.values(), default=0.0) if probs else float(route.confidence)
     row = {
         "ts": now,
         "worker_id": worker_id,
@@ -108,7 +111,7 @@ def log_case(hive, worker_id: int, title: str, task_text: str, request: dict,
         "options": dict(q["criteria"]),
         "probs": probs,
         "router_pick": router_pick,
-        "confidence": round(float(route.confidence), 6),
+        "confidence": round(confidence, 6),
         "reason": reason,
         "human_pick": human_pick,
         "final_tier": route.tier,

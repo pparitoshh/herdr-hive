@@ -130,6 +130,11 @@ def _check_sender(conn, sender: str) -> None:
         raise BusError(f"sender {sender} is not the handle of this pane ({row['name']})")
 
 
+def ref_ok(conn, hive_id: int, ref: str) -> bool:
+    """Is `ref` inside the hive worktree or one of the worker worktrees?"""
+    return _ref_ok(conn, hive_id, ref)
+
+
 def _ref_ok(conn, hive_id: int, ref: str) -> bool:
     p = str(Path(ref).resolve())
     ws = [r["worktree"] for r in
