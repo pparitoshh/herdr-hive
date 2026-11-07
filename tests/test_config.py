@@ -52,7 +52,7 @@ class ConfigTest(unittest.TestCase):
         cfg = config.load(repo, path=g)
         self.assertEqual(set(cfg.tiers), {"fast", "regular", "think"})
         self.assertEqual((cfg.routing.mode, cfg.routing.min_confidence, cfg.routing.idle_exit, cfg.routing.timeout_s),
-                         ("auto", 0.5, 1800, 2))
+                         ("auto", 0.40, 1800, 2))
         (repo / ".hive.toml").write_text(
             '[tiers.think]\nharness = "claude"\nmodel = "claude-opus-5-5"\n'
             'description = "hard"\n\n[routing]\nmode = "ask"\nmin_confidence = 0.6\nidle_exit = "5m"\ntimeout_s = 1\n')

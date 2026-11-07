@@ -54,7 +54,7 @@ description = "Hard or unclear work: design, unclear bugs, concurrency, performa
 
 [routing]
 mode = "auto"            # auto | ask | fixed
-min_confidence = 0.5     # below this, the human picks the tier
+min_confidence = 0.40    # below this, the human picks the tier
 idle_exit = "30m"        # the router server exits after this idle time
 timeout_s = 2            # max wait for one router request
 
@@ -120,7 +120,7 @@ TIERS = {
 @dataclass
 class Routing:
     mode: str = "auto"
-    min_confidence: float = 0.5
+    min_confidence: float = 0.40
     idle_exit: int = 1800
     timeout_s: int = 2
 
@@ -212,7 +212,7 @@ def load(repo: Path | None = None, path: Path | None = None) -> Config:
     r = data.get("routing", {})
     idle = r.get("idle_exit", 1800)
     cfg.routing = Routing(mode=str(r.get("mode", "auto")),
-                          min_confidence=float(r.get("min_confidence", 0.5)),
+                          min_confidence=float(r.get("min_confidence", 0.40)),
                           idle_exit=parse_duration(idle) if isinstance(idle, str) else int(idle),
                           timeout_s=int(r.get("timeout_s", 2)))
     return cfg
