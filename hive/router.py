@@ -74,10 +74,13 @@ CLS = 50281
 SEP = 50282
 REQ_TIMEOUT_S = 2.0
 
-TIER_OPTIONS = [  # (label, description) per ROUTING_PLAN section "Tiers"
-    ("fast", "Short and simple tasks: one file, clear change, no design"),
-    ("regular", "Normal coding tasks with tests"),
-    ("think", "Long or difficult tasks: design, debugging, many files, unclear goal"),
+TIER_OPTIONS = [  # (label, description); text tuned in step 2b, same string as hive/config.py
+    ("fast", "Small mechanical edit: one or two files, obvious and low risk, no tests needed. "
+             "Examples: fix a typo, delete an unused import, rename in one file, change one message."),
+    ("regular", "Normal feature or bug fix: a few files and tests, clear goal, regular patterns. "
+                "Examples: add a CLI flag end to end, fix an off-by-one with a regression test."),
+    ("think", "Hard or unclear work: design, unclear bugs, concurrency, performance, many-file refactor. "
+              "Examples: fix a flaky test with no local repro, design a plugin API, find a memory leak."),
 ]
 TIER_QUESTION = "Which worker tier must handle this task?"
 
@@ -335,22 +338,48 @@ def get_model():
 
 # --- task -> decision input (plan section "Router", point 1) --------------------------------------
 
+SIGNAL_WORDS = (  # state-feature keywords found in the tuning (step 2b)
+    ("refactor", "refactor"), ("design", "design"), ("architecture", "design"),
+    ("interface", "design"), ("protocol", "design"), ("migration", "design"),
+    ("race", "concurrency"), ("deadlock", "concurrency"), ("lock", "concurrency"),
+    ("flaky", "hard-debug"), ("memory", "hard-debug"), ("leak", "hard-debug"),
+    ("perf", "perf"), ("latency", "perf"), ("slow", "perf"), ("spike", "perf"),
+    ("unclear", "unclear"), ("repro", "unclear"), ("investigat", "unclear"),
+    ("typo", "tiny"), ("docstring", "tiny"), ("comment", "tiny"),
+    ("README", "tiny"), ("import", "tiny"), ("rename", "tiny"), ("one file", "tiny"),
+)
+
+
+def task_signals(task_text: str) -> list[str]:
+    """Keyword hints from the task text for the state features."""
+    hits, low = [], (task_text or "").lower()
+    for word, tag in SIGNAL_WORDS:
+        if word.lower() in low and tag not in hits:
+            hits.append(tag)
+    return hits
+
+
 def task_question(task_text: str, title: str | None = None, file_count: int = 0,
                   criteria: list[tuple[str, str]] | None = None):
     """Build the /v1/decide request for tier routing.
 
-    `criteria` is the option list (label, description). The callers pass the
-    tier descriptions from config (task item 2); the built-in TIER_OPTIONS is
-    only the fallback.
-    """
-    state_text = (title or "").strip()
-    if state_text:
-        state_text += ". "
-    state_text += (task_text or "")[:2000].strip()
+    `criteria` is the option list (label, description) from config; TIER_OPTIONS is the fallback.
+
+    State text (tuned in step 2b): task text, then the task length, then the
+    keyword signals, then the repo file count."""
+    trimmed = (task_text or "")[:2000].strip()
+    title_text = (title or "").strip()
+    state_text = title_text + ". " if title_text else ""
+    state_text += trimmed
+    if trimmed:
+        state_text += f" The task text is about {len(trimmed)} characters long."
+        sig = task_signals(task_text)
+        if sig:
+            state_text += " Signals in the text: " + ", ".join(sig) + "."
     if file_count:
         state_text += f" The repo has {file_count} files."
     return {
-        "state": state_text,
+        "state": state_text.strip(),
         "preferences": {"cost": "low cost before speed"},
         "questions": [{"id": "tier", "type": "choice", "instructions": TIER_QUESTION,
                        "criteria": {label: desc for label, desc in (criteria or TIER_OPTIONS)}}],
