@@ -43,17 +43,18 @@ Unit tests (`PYTHONPATH=. python3 -m unittest discover -s tests`): 45 tests, 43 
 | J | `routing.mode = "fixed"` | Done | Merged (a00ebba). |
 | K | Live end-to-end test (7 tests) | Done | bfc3ad8: plain picker mode, early task-file check, log confidence fix. 100 tests passed. |
 | L | Worker permissions for each launch | Done, live test open | b0d5d82, merged 5c891c7. Claude: `--settings` (allow only `hive msg/inbox/show`) and `--add-dir`. OpenCode: `OPENCODE_PERMISSION`. Trust dialog notice to the brain. 112 tests pass. |
-| M | Short live test of Task L | Stopped (laptop closed) | Partial. Task file: `.hive/tasks/worker-perms-live-test.md`. |
+| M | Short live test of Task L | Partial (stopped) | Claude worker: `hive msg` ran with no dialog (`Bash(hive msg:*)` matched). The trust dialog did not show, because the brain answer trusted the repo root. OpenCode: not tested. Task file: `.hive/tasks/worker-perms-live-test.md`. |
 
 `main` has the merge of a00ebba (dd7d2aa). `main` does not have Task K and Task L yet.
 
 ## Next (2026-11-08)
 
-1. Run Task M again with a Haiku brain. Check: trust notice, `hive msg` with no dialog, OpenCode with no `external_directory` dialog, the exact `hive msg` command form.
-2. If Task M passes, merge `origin/worker-routing-v2` into `main`.
-3. Fix: the trust dialog also shows on the hive brain. Task L covers only workers.
-4. Decide on `workers.pretrust` (writes `~/.claude.json`, needs the user).
-5. Router: all confidences were near 0.40, and the simple task got regular, not fast. Collect cases in the retrain log, then tune.
+1. Fix: worker panes do not get `HIVE_STATE_DIR`. With a custom state dir, `hive msg` fails with "no open hive here". Pass `HIVE_STATE_DIR` in the worker launch env.
+2. Run Task M again with a Haiku brain. Test the OpenCode worker (`external_directory`). Use a new repo to see the trust notice on a worker.
+3. If Task M passes, merge `origin/worker-routing-v2` into `main`.
+4. Fix: the trust dialog also shows on the hive brain. Task L covers only workers. The dialog preselects "No, exit", so one Enter key closes Claude.
+5. Decide on `workers.pretrust` (writes `~/.claude.json`, needs the user).
+6. Router: all confidences were near 0.40, and the simple task got regular, not fast. Collect cases in the retrain log, then tune.
 
 ## Open work
 
