@@ -57,8 +57,9 @@ def pick_harness_model(cfg, who: str, workspace=None, harnesses=None) -> tuple[s
     if not pick:
         return None
     h = cfg.harnesses[names[labels.index(pick)]]
-    model = ask(f"Hive: {who} model", f"{h.label} model for the {who}", h.models, allow_text=True,
-                default=h.models[0] if h.models else None, workspace=workspace)
+    models = h.model_choices()
+    model = ask(f"Hive: {who} model", f"{h.label} model for the {who}", models, allow_text=True,
+                default=models[0] if models else None, workspace=workspace)
     if not model:
         return None
     return h.name, model
@@ -283,7 +284,7 @@ def _live_worker(conn, hive, wn):
 
 # --- merge / discard -------------------------------------------------------------
 
-def remove_worker(conn, hive, w, status, force_branch=False):
+def remove_worker(conn, hive, w, status, force_branch=False, merged_into=None):
     git = G()
     if w["pane_id"]:
         H.pane_close(w["pane_id"])
@@ -293,8 +294,11 @@ def remove_worker(conn, hive, w, status, force_branch=False):
         git.worktree_remove(repo, Path(w["worktree"]), force=force_branch)
     except Exception as e:
         print(f"hive: worktree remove: {e}", file=sys.stderr)
+    # `git branch -d` checks against HEAD of the primary checkout, not the hive branch.
+    # A branch that is merged into the hive branch is safe to delete with -D.
+    merged = bool(merged_into) and git.is_ancestor(repo, w["branch"], merged_into)
     try:
-        git.branch_delete(repo, w["branch"], force=force_branch)
+        git.branch_delete(repo, w["branch"], force=force_branch or merged)
     except Exception as e:
         print(f"hive: branch delete: {e}", file=sys.stderr)
     state.update(conn, "workers", w["id"], status=status, merged_at=time.time() if status == "merged" else None)
@@ -320,7 +324,7 @@ def cmd_merge(args):
                  worker=w["n"], task=str(w["id"]))
         print(f"conflict: w{w['n']} told to rebase on {hive['branch']}\n{out}")
         return 5
-    remove_worker(conn, hive, w, "merged", force_branch=False)
+    remove_worker(conn, hive, w, "merged", force_branch=False, merged_into=hive["branch"])
     state.event(conn, hive["id"], "merge", {"n": w["n"]}, w["id"])
     print(f"merged w{w['n']} into {hive['branch']}; pane, worktree and branch removed")
     return 0

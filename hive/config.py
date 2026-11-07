@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,8 @@ command = ["opencode"]
 model_arg = ["--model", "{model}"]
 auto_approve_args = []
 models  = ["anthropic/claude-sonnet-5-5"]
+# The picker runs this command and lists each output line as a model. `models` stays first.
+models_command = ["opencode", "models"]
 herdr_kind = "opencode"
 headless_args = ["run"]
 
@@ -49,6 +52,21 @@ class Harness:
     models: list[str] = field(default_factory=list)
     herdr_kind: str = ""
     headless_args: list[str] = field(default_factory=list)
+    models_command: list[str] = field(default_factory=list)
+
+    def model_choices(self, timeout: float = 15) -> list[str]:
+        """The static `models`, then each line of `models_command` output, without duplicates.
+
+        If the command fails, only the static list is returned."""
+        out = list(self.models)
+        if self.models_command:
+            try:
+                r = subprocess.run(self.models_command, capture_output=True, text=True, timeout=timeout)
+                if r.returncode == 0:
+                    out += [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return list(dict.fromkeys(out))
 
     def argv(self, model: str | None, worker: bool, extra: list[str] | None = None) -> list[str]:
         out = list(self.command)
@@ -129,6 +147,7 @@ def load(repo: Path | None = None, path: Path | None = None) -> Config:
             models=list(h.get("models", [])),
             herdr_kind=h.get("herdr_kind", name),
             headless_args=list(h.get("headless_args", [])),
+            models_command=list(h.get("models_command", [])),
         )
     cfg.review_harnesses = [n for n in data.get("review", {}).get("harnesses", []) if n in cfg.harnesses]
     return cfg

@@ -9,7 +9,7 @@ from pathlib import Path
 from hive import git_ops
 from hive.git_ops import GitError, add_info_exclude, branch_delete, branch_exists
 from hive.git_ops import copy_worktreeinclude, current_branch, has_uncommitted
-from hive.git_ops import is_worker_worktree, merge_no_ff, primary_checkout
+from hive.git_ops import is_ancestor, is_worker_worktree, merge_no_ff, primary_checkout
 from hive.git_ops import push, repo_root, worktree_add, worktree_list, worktree_remove
 
 
@@ -89,6 +89,25 @@ class GitOpsTest(unittest.TestCase):
         self.assertEqual(
             run_git(self.repo, "log", "-1", "--format=%s", "main").strip(), "merge w1"
         )
+
+    def test_merged_into_hive_branch_not_main(self):
+        # The hive branch lives in its own worktree; the primary checkout stays on main.
+        hive_wt = self.base / "hive-feat"
+        run_git(self.repo, "worktree", "add", "-b", "feat", str(hive_wt), "main")
+        wt = self.base / "feat-w1"
+        run_git(self.repo, "worktree", "add", "-b", "hive/feat/w1", str(wt), "feat")
+        (wt / "b.txt").write_text("worker\n")
+        run_git(wt, "add", "b.txt")
+        run_git(wt, "commit", "-m", "worker commit")
+        self.assertFalse(is_ancestor(self.repo, "hive/feat/w1", "feat"))
+        ok, _ = merge_no_ff(hive_wt, "hive/feat/w1", "merge w1")
+        self.assertTrue(ok)
+        self.assertTrue(is_ancestor(self.repo, "hive/feat/w1", "feat"))
+        worktree_remove(self.repo, wt)
+        with self.assertRaises(GitError):  # -d checks against main, so it refuses
+            branch_delete(self.repo, "hive/feat/w1")
+        branch_delete(self.repo, "hive/feat/w1", force=True)
+        self.assertFalse(branch_exists(self.repo, "hive/feat/w1"))
 
     def test_merge_conflict_aborts(self):
         wt = self.worker_worktree()

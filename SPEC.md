@@ -77,6 +77,7 @@ command = ["opencode"]
 model_arg = ["--model", "{model}"]
 auto_approve_args = []            # radio join writes opencode permission config
 models  = ["anthropic/claude-sonnet-5-5", "openai/gpt-x", "ollama/qwen3-coder"]
+models_command = ["opencode", "models"]  # optional: one model per output line, added after `models`
 herdr_kind = "opencode"
 
 [review]                          # optional AI review key in bench

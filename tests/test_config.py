@@ -18,6 +18,15 @@ class ConfigTest(unittest.TestCase):
         argv = cfg.harness("claude").argv("claude-haiku-5-5", worker=True)
         self.assertEqual(argv, ["claude", "--model", "claude-haiku-5-5", "--permission-mode", "acceptEdits"])
 
+    def test_models_command(self):
+        h = config.Harness(name="x", label="X", command=["x"], models=["a", "b"],
+                           models_command=["printf", "b\\nc\\n\\nd\\n"])
+        self.assertEqual(h.model_choices(), ["a", "b", "c", "d"])
+        h.models_command = ["false"]
+        self.assertEqual(h.model_choices(), ["a", "b"])
+        h.models_command = ["/no/such/cmd"]
+        self.assertEqual(h.model_choices(), ["a", "b"])
+
     def test_duration(self):
         self.assertEqual(config.parse_duration("30m"), 1800)
         self.assertEqual(config.parse_duration("5"), 5)

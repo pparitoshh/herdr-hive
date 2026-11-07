@@ -84,6 +84,7 @@ Extra keys:
 | `defaults.ask_timeout` | `"30m"` | Timeout for popups |
 | `defaults.allowed_harnesses` | all | Per-repo allow list |
 | `harness.<x>.headless_args` | — | Arguments for the AI review run, for example `["-p"]` for claude |
+| `harness.<x>.models_command` | — | A command that prints one model on each line, for example `["opencode", "models"]`. The model picker lists these after `models`. If the command fails, the picker shows only `models`. |
 
 List the files to copy into each new worktree in `<repo>/.worktreeinclude` (gitignore syntax).
 

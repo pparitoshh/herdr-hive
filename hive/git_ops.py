@@ -118,6 +118,13 @@ def branch_delete(repo, branch: str, force: bool = False) -> None:
     _run(repo, "branch", "-D" if force else "-d", branch)
 
 
+def is_ancestor(repo, commit: str, of: str) -> bool:
+    """True when `commit` is reachable from `of` (it is merged into `of`)."""
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", commit, of], cwd=str(repo),
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def merge_no_ff(worktree, branch: str, message: str) -> tuple[bool, str]:
     """Merge `branch` into the worktree at `worktree` with a merge commit.
 
