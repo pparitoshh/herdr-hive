@@ -351,5 +351,59 @@ class RouterAskTest(unittest.TestCase):
             state.STATE_DIR = saved_dir
 
 
+class FixedModeTest(BaseSpawnTest):
+    """routing.mode = "fixed": the old harness + model picker flow, no router
+    call, no retrain log line, tier None (task J)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / ".hive.toml").write_text('[routing]\nmode = "fixed"\n')
+
+    def test_fixed_mode_uses_old_picker(self):
+        fake = fake_ask_server(self.capture, error="router must not run")
+        picker = Picker("claude — Claude Code", "claude-haiku-5-5")
+        with self._patch_io(picker=picker, router_fake=fake):
+            rc = self.spawn()
+        self.assertEqual(rc, 0)
+        w = self.worker()
+        rj = json.loads(w["route_json"])
+        self.assertIsNone(w["tier"])
+        self.assertEqual((rj["decided_by"], rj["probs"], rj["confidence"]), ("fixed", {}, 0.0))
+        self.assertEqual((w["harness"], w["model"]), ("claude", "claude-haiku-5-5"))
+        self.assertEqual(picker.calls[0]["prompt"], "Harness for the worker (task)")
+        self.assertEqual(picker.calls[1]["prompt"], "Claude Code model for the worker (task)")
+        self.assertEqual(routelog.cases(), [])  # no retrain log line
+        self.assertIn("route", self.event_kinds())
+        self.assertIn("tier=-", self.out.getvalue())
+
+    def test_fixed_mode_cancelled(self):
+        fake = fake_ask_server(self.capture, error="router must not run")
+        picker = Picker(None)  # no harness answer
+        with self._patch_io(picker=picker, router_fake=fake):
+            rc = self.spawn()
+        self.assertEqual(rc, 4)
+        self.assertEqual(state.workers(self.conn, self.hid), [])
+        self.assertIn("spawn_declined", self.event_kinds())
+
+    def test_tier_flag_wins_over_fixed(self):
+        fake = fake_ask_server(self.capture, error="router must not run")
+        with self._patch_io(picker=Picker(), router_fake=fake):  # no picker call at all
+            rc = self.spawn(tier="think")
+        self.assertEqual(rc, 0)
+        w = self.worker()
+        rj = json.loads(w["route_json"])
+        self.assertEqual((w["tier"], rj["decided_by"]), ("think", "flag"))
+        self.assertEqual(routelog.cases(), [])
+
+    def test_unknown_mode_fails_clean(self):
+        (self.repo / ".hive.toml").write_text('[routing]\nmode = "bogus"\n')
+        fake = fake_ask_server(self.capture, error="router must not run")
+        with self._patch_io(picker=Picker(), router_fake=fake):
+            with self.assertRaises(SystemExit) as cm:
+                self.spawn()
+        self.assertIn("unknown routing mode", str(cm.exception))
+        self.assertEqual(state.workers(self.conn, self.hid), [])
+
+
 if __name__ == "__main__":
     unittest.main()

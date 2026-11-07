@@ -12,7 +12,7 @@ from pathlib import Path
 from . import config, state
 from . import herdr_ops as H
 from . import bus
-from .takeover import decide_tier, human_prompt, RouterUnavailable
+from .takeover import decide_tier, human_prompt, Route, RouterUnavailable
 
 ROLES = Path(__file__).parent / "roles"
 PENDING = state.STATE_DIR / "pending"
@@ -54,6 +54,13 @@ def route_for_spawn(hive, cfg, task_text: str, title: str, flag_tier: str | None
     from . import router
     captured: dict = {}
     criteria = router.tier_criteria(cfg)
+    mode = (cfg.routing.mode or "").strip().lower()
+    if mode not in ("auto", "ask", "fixed"):
+        raise SystemExit(f"hive: unknown routing mode {cfg.routing.mode!r} (known: auto, ask, fixed)")
+    if mode == "fixed" and not flag_tier:
+        # Old flow (plan §Spawn flow): the caller picks harness + model with
+        # pick_harness_model. No router call, no retrain log line, tier None.
+        return Route(tier=None, probs={}, confidence=0.0, decided_by="fixed"), None, None
 
     def ask_router(text: str, title2: str | None) -> dict[str, float]:
         request = router.task_question(text, title=title2,
@@ -74,7 +81,7 @@ def route_for_spawn(hive, cfg, task_text: str, title: str, flag_tier: str | None
         return ask("Hive: worker tier", human_prompt(reason, probs, default), choices,
                    workspace=hive["workspace_id"])
 
-    route = decide_tier(task_text, title, list(cfg.tiers), cfg.routing.mode,
+    route = decide_tier(task_text, title, list(cfg.tiers), mode,
                         cfg.routing.min_confidence, ask_router, ask_human, flag_tier=flag_tier)
     request = captured.get("request") or router.task_question(
         task_text, title=title,
@@ -319,12 +326,21 @@ def cmd_spawn(args):
     file_count = repo_file_count(hive["repo"])
     route, router_request, human_reason = route_for_spawn(
         hive, cfg, task_text, title, flag_tier=args.tier, file_count=file_count)
-    if route.tier is None:
-        state.event(conn, hive["id"], "spawn_declined", {"title": title, "reason": "tier cancelled"})
-        print("hive: spawn declined by the human", file=sys.stderr)
-        return 4
-    tier_cfg = cfg.tiers[route.tier]
-    hname, model = tier_cfg.harness, tier_cfg.model
+    if route.decided_by == "fixed":
+        # Old flow: harness + model picker, no tier (plan §Spawn flow).
+        pick = pick_harness_model(cfg, f"worker ({title})", workspace=hive["workspace_id"])
+        if not pick:
+            state.event(conn, hive["id"], "spawn_declined", {"title": title})
+            print("hive: spawn declined by the human", file=sys.stderr)
+            return 4
+        hname, model = pick
+    else:
+        if route.tier is None:
+            state.event(conn, hive["id"], "spawn_declined", {"title": title, "reason": "tier cancelled"})
+            print("hive: spawn declined by the human", file=sys.stderr)
+            return 4
+        tier_cfg = cfg.tiers[route.tier]
+        hname, model = tier_cfg.harness, tier_cfg.model
     n = state.next_worker_n(conn, hive["id"])
     wb = worker_branch(hive["branch"], n)
     wt = Path(hive["worktree"]).parent / f"{hive['name']}-w{n}"
@@ -335,10 +351,11 @@ def cmd_spawn(args):
                            model=model, title=title, task_ref=str(task), status="spawning",
                            tier=route.tier, route_json=route_json)
     from . import routelog
-    routelog.log_case(hive, wid, title, task_text, router_request, route, cfg,
-                      reason=_route_reason(route, human_reason, cfg),
-                      state_features={"title": title, "file_count": file_count},
-                      human_pick=route.tier if route.decided_by == "human" else None)
+    if route.decided_by != "fixed":  # fixed mode: no router, no retrain log line
+        routelog.log_case(hive, wid, title, task_text, router_request, route, cfg,
+                          reason=_route_reason(route, human_reason, cfg),
+                          state_features={"title": title, "file_count": file_count},
+                          human_pick=route.tier if route.decided_by == "human" else None)
     try:
         git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
         git.copy_worktreeinclude(Path(hive["repo"]), wt)
@@ -364,7 +381,7 @@ def cmd_spawn(args):
     state.event(conn, hive["id"], "route", {"tier": route.tier, "decided_by": route.decided_by,
                                             "confidence": round(route.confidence, 6),
                                             "probs": {t: round(float(p), 6) for t, p in route.probs.items()}}, wid)
-    print(f"spawned w{n} tier={route.tier} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
+    print(f"spawned w{n} tier={route.tier or '-'} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
     return 0
 
 
