@@ -216,44 +216,50 @@ class FlagTest(BaseSpawnTest):
         self.assertEqual(routelog.cases(), [])
 
 
-class SaveCasesOffTest(BaseSpawnTest):
-    """The retrain log is OFF by default (user request, task item 6)."""
+class SaveCasesTest(BaseSpawnTest):
+    """The retrain log is ON by default (user change); HIVE_SAVE_CASES=0 or
+    `routing.save_cases = false` turns it off."""
 
-    def test_default_writes_nothing_and_makes_no_dir(self):
+    def test_default_on_writes_case_and_outcome(self):
+        picker = Picker("think")
+        with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
+                            save_cases=None):  # env untouched; the config default is on
+            rc = self.spawn()
+            commands._route_outcome(self.worker()["id"], "merge", hive={"repo": str(self.repo)})
+        self.assertEqual(rc, 0)
+        cases = routelog.cases()
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["human_pick"], "think")
+        self.assertEqual(routelog.outcomes(), {self.worker()["id"]: "merge"})
+
+    def test_env_zero_turns_it_off(self):
         picker = Picker("think")
         with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
                             save_cases="0"):
             rc = self.spawn()
+            commands._route_outcome(self.worker()["id"], "merge", hive={"repo": str(self.repo)})
         self.assertEqual(rc, 0)
         w = self.worker()
         self.assertEqual(json.loads(w["route_json"])["decided_by"], "human")
         self.assertFalse((state.STATE_DIR / "route_log").exists())  # no dir, no files
-        commands._route_outcome(w["id"], "merge")  # outcome lines are off as well
-        self.assertFalse((state.STATE_DIR / "route_log").exists())
 
-    def test_env_override_turns_it_on(self):
+    def test_env_one_overrides_config_false(self):
+        (self.repo / ".hive.toml").write_text('[routing]\nsave_cases = false\n')
         picker = Picker("think")
         with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
                             save_cases="1"):
             rc = self.spawn()
-            commands._route_outcome(self.worker()["id"], "merge")  # env still on inside
         self.assertEqual(rc, 0)
         self.assertEqual(len(routelog.cases()), 1)
-        self.assertEqual(routelog.outcomes(), {self.worker()["id"]: "merge"})
 
-    def test_config_save_cases_true_turns_it_on(self):
-        # the env is unset, so the config decides
-        (self.repo / ".hive.toml").write_text('[routing]\nsave_cases = true\n')
+    def test_config_false_without_env_turns_it_off(self):
+        (self.repo / ".hive.toml").write_text('[routing]\nsave_cases = false\n')
         picker = Picker("think")
         with self._patch_io(picker=picker, router_fake=fake_ask_server(self.capture, PROBS_LOW),
                             save_cases=None):
             rc = self.spawn()
         self.assertEqual(rc, 0)
-        self.assertEqual(len(routelog.cases()), 1)
-        commands._route_outcome(self.worker()["id"], "merge", hive={  # hive["repo"] has the toml
-            "repo": str(self.repo)})
-        self.assertEqual(routelog.outcomes(), {self.worker()["id"]: "merge"})
-        self.assertEqual(config.load(self.repo, path=self.config_path).routing.save_cases, True)
+        self.assertFalse((state.STATE_DIR / "route_log").exists())
 
     def test_export_prints_zero_rows_when_off(self):
         out = _d() / "train2.jsonl"

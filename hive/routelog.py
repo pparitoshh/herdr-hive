@@ -1,7 +1,7 @@
 """Retrain log for routing cases (routing step 3b, task items 4 and 5).
 
-The log is OFF by default (user request, task item 6): `routing.save_cases`
-is false, and `$HIVE_SAVE_CASES=1` turns it on. When it is off, `log_case`
+The log is ON by default (user change): `routing.save_cases` is true, and
+`$HIVE_SAVE_CASES=0` turns it off. When it is off, `log_case`
 and `log_outcome` write nothing and create no `route_log/` directory.
 `hive router export` still reads old files and writes 0 rows when there are
 none.
