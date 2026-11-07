@@ -70,6 +70,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(row["status"], "delivered")
         self.assertEqual(row["sender"], "w1.bt")
 
+    def test_systemexit_none_is_success(self):
+        with mock.patch.object(cli, "cmd_status", side_effect=SystemExit(None)):
+            rc, _, _ = self.cli("status")
+        self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

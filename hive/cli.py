@@ -132,9 +132,13 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         code = 130
     except SystemExit as e:
-        code = e.code if isinstance(e.code, int) else 1
-        if e.code and not isinstance(e.code, int):  # argparse errors print themselves
-            print(e.code, file=sys.stderr)
+        if e.code is None:  # SystemExit(None) is success
+            code = 0
+        elif isinstance(e.code, int):
+            code = e.code
+        else:
+            print(e.code, file=sys.stderr)  # argparse errors print themselves
+            code = 1
     except ValueError as e:  # bus.BusError and other bad-input errors
         print(f"hive: {e}", file=sys.stderr)
         code = 1
