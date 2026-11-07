@@ -143,11 +143,22 @@ def wait_shell(pane: str, timeout: float = 15) -> None:
         time.sleep(0.3)
 
 
-def wait_agent_ready(pane: str, timeout_ms: int = 90000, blocked_timeout_ms: int = 1800000) -> bool:
+def pane_text(pane: str) -> str:
+    """Visible pane text; empty when the pane is gone or unreadable."""
+    try:
+        return call("pane", "read", pane, "--source", "visible").get("text", "")
+    except HerdrError:
+        return ""
+
+
+def wait_agent_ready(pane: str, timeout_ms: int = 90000, blocked_timeout_ms: int = 1800000,
+                     on_dialog=None) -> bool:
     """Wait until herdr detects an agent in the pane and it settles idle.
 
-    A startup dialog (folder trust, login) makes the agent `blocked`. Only the
-    human can answer it, so hive sends a toast and waits up to blocked_timeout_ms.
+    A startup dialog (folder trust, login, approval) makes the agent `blocked`.
+    Only the human can answer it, so hive waits up to blocked_timeout_ms and
+    notifies once: `on_dialog(p, text)` when given (text = visible pane text),
+    else a generic toast.
     """
     end = time.time() + timeout_ms / 1000
     told = False
@@ -158,7 +169,10 @@ def wait_agent_ready(pane: str, timeout_ms: int = 90000, blocked_timeout_ms: int
             return True
         if st == "blocked" and not told:
             told = True
-            toast("Hive: agent needs you", f"Answer the dialog in pane {p.get('label') or pane}")
+            if on_dialog:
+                on_dialog(p, pane_text(pane))
+            else:
+                toast("Hive: agent needs you", f"Answer the dialog in pane {p.get('label') or pane}")
             end = max(end, time.time() + blocked_timeout_ms / 1000)
         time.sleep(1)
     return False

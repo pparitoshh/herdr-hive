@@ -1,6 +1,7 @@
 """Config: global harnesses.toml merged with an optional per-repo .hive.toml (spec §4)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tomllib
@@ -16,6 +17,10 @@ base_branch = "main"
 # worktree_root = "~/.herdr/worktrees"   # herdr [worktrees].directory is used if unset
 auto_open = true
 ask_timeout = "30m"
+
+[workers]
+# Hook for a future trust-dialog bypass write (task L). Not used yet.
+pretrust = false
 
 [harness.claude]
 label   = "Claude Code"
@@ -99,6 +104,39 @@ class Harness:
         return out + list(extra or [])
 
 
+# The bus commands a worker may run. Anything else stays unapproved.
+HIVE_BUS_CMDS = ("hive msg", "hive inbox", "hive show")
+
+
+def claude_worker_settings() -> dict:
+    """The `--settings` file content: allow only the hive bus commands."""
+    return {"permissions": {"allow": [f"Bash({c}:*)" for c in HIVE_BUS_CMDS]}}
+
+
+def claude_worker_perm_argv(settings_path: str | Path, hive_worktree: str | Path) -> list[str]:
+    """Extra claude flags for a worker: the settings file and the hive worktree."""
+    return ["--settings", str(settings_path), "--add-dir", str(hive_worktree)]
+
+
+def opencode_worker_perm_env(hive_worktree: str | Path) -> dict[str, str]:
+    """Per-launch OpenCode permissions for a worker (OPENCODE_PERMISSION env var).
+
+    external_directory allows only the hive worktree; bash allows only the hive
+    bus commands and falls back to ask for everything else."""
+    perm = {
+        "permission": {
+            "external_directory": {f"{hive_worktree}/**": "allow"},
+            "bash": {**{f"{c}*": "allow" for c in HIVE_BUS_CMDS}, "*": "ask"},
+        },
+    }
+    return {"OPENCODE_PERMISSION": json.dumps(perm)}
+
+
+@dataclass
+class WorkerPolicy:
+    pretrust: bool = False  # hook for a future trust-dialog bypass write; not used yet
+
+
 @dataclass
 class Tier:
     name: str
@@ -134,6 +172,7 @@ class Config:
     worktree_root: Path | None = None
     auto_open: bool = True
     ask_timeout: str = "30m"
+    workers: WorkerPolicy = field(default_factory=WorkerPolicy)
     harnesses: dict[str, Harness] = field(default_factory=dict)
     review_harnesses: list[str] = field(default_factory=list)
     tiers: dict[str, Tier] = field(default_factory=dict)
@@ -185,6 +224,7 @@ def load(repo: Path | None = None, path: Path | None = None) -> Config:
         worktree_root=Path(d["worktree_root"]).expanduser() if d.get("worktree_root") else None,
         auto_open=bool(d.get("auto_open", True)),
         ask_timeout=str(d.get("ask_timeout", "30m")),
+        workers=WorkerPolicy(pretrust=bool(data.get("workers", {}).get("pretrust", False))),
     )
     allowed = d.get("allowed_harnesses")
     for name, h in data.get("harness", {}).items():

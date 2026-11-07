@@ -170,26 +170,87 @@ def find_key(obj, key):
     return None
 
 
+# --- worker permissions (task L) ---------------------------------------------------
+
+TRUST_DIALOG = re.compile(r"do you trust the files in this folder|trust this folder", re.I)
+
+
+def worker_perm_argv(harness, worktree: str, hive_worktree: str) -> tuple[list[str], dict[str, str]]:
+    """Per-launch permission grant for a worker: extra argv flags and env vars.
+
+    Claude reads a settings file under `<worktree>/.tmp` (`--settings`) plus
+    `--add-dir <hive worktree>`. OpenCode reads the OPENCODE_PERMISSION env
+    var. Only the hive bus commands and the hive worktree path are allowed;
+    nothing is written to a user-level config file.
+    """
+    if harness.herdr_kind == "claude":
+        settings = Path(worktree) / ".tmp" / "hive-perms.json"
+        settings.write_text(json.dumps(config.claude_worker_settings()))
+        os.chmod(settings, 0o600)
+        return config.claude_worker_perm_argv(settings, hive_worktree), {}
+    if harness.herdr_kind == "opencode":
+        return [], config.opencode_worker_perm_env(hive_worktree)
+    return [], {}
+
+
+def _tell_brain_trust(handle: str, body: str) -> None:
+    """Bus message to the brain: the worker waits on the trust dialog.
+    Never blocks the launch."""
+    hive = bus.hive_of(handle) or ""
+    if not hive or handle == bus.brain_handle(hive):
+        return  # the brain cannot tell itself
+    try:
+        bus.send(bus.brain_handle(hive), "system", hive, body,
+                 sender=bus.system_handle(hive))
+    except bus.BusError as e:
+        print(f"hive: bus: {e}", file=sys.stderr)
+
+
+def blocked_notice(handle: str, pane_id: str) -> callable:
+    """on_dialog hook for wait_agent_ready: when the blocked dialog is the
+    folder-trust prompt, toast and tell the brain; otherwise a generic toast."""
+    def notice(p: dict, text: str) -> None:
+        label = p.get("label") or pane_id
+        if TRUST_DIALOG.search(text or ""):
+            body = f"worker {handle} waits on the trust dialog in pane {label}"
+            H.toast("Hive: worker blocked", body)
+            _tell_brain_trust(handle, body)
+        else:
+            H.toast("Hive: agent needs you", f"Answer the dialog in pane {label}")
+    return notice
+
+
 def launch_agent(pane: str, handle: str, harness, model: str, worker: bool, role: str, workspace: str,
-                 worktree: str | None = None):
+                 worktree: str | None = None, hive_worktree: str | None = None):
     """Bus join (handle only) -> start harness in the pane -> inject the role prompt.
 
     A worker needs TMPDIR=<worktree>/.tmp: OpenCode rejects writes outside the
-    worktree and a /tmp write stopped a run (plan §Worker temp dir).
+    worktree and a /tmp write stopped a run (plan §Worker temp dir). With
+    `hive_worktree`, a worker also gets a per-launch permission grant: only the
+    hive bus commands and the hive worktree path (task L).
     """
     bus.join(handle, pane, workspace=workspace)
     H.pane_rename(pane, handle)
     H.wait_shell(pane)
     argv = harness.argv(model, worker=worker)
+    envs: list[str] = []
+    notice = None
     if worker and worktree:
         tmp = Path(worktree) / ".tmp"
         tmp.mkdir(parents=True, exist_ok=True)
-        argv = ["env", f"TMPDIR={tmp}", *argv]
+        envs.append(f"TMPDIR={tmp}")
+        if hive_worktree:
+            flags, henv = worker_perm_argv(harness, worktree, hive_worktree)
+            argv += flags
+            envs += [f"{k}={v}" for k, v in henv.items()]
+        notice = blocked_notice(handle, pane)
+    if envs:
+        argv = ["env", *envs, *argv]
     H.pane_run(pane, argv)
-    if not H.wait_agent_ready(pane):
+    if not H.wait_agent_ready(pane, on_dialog=notice):
         raise SystemExit(f"hive: {harness.name} did not become ready in pane {pane}")
     H.agent_prompt(pane, role)
-    H.wait_agent_ready(pane, timeout_ms=120000)
+    H.wait_agent_ready(pane, timeout_ms=120000, on_dialog=notice)
 
 
 def msgs_dir(hive) -> Path:
@@ -363,7 +424,8 @@ def cmd_spawn(args):
         role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
                          branch=hive["branch"], handle=handle, brain=brain)
         launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
-                     workspace=hive["workspace_id"], worktree=str(wt))
+                     workspace=hive["workspace_id"], worktree=str(wt),
+                     hive_worktree=str(hive["worktree"]))
     except Exception as e:
         state.update(conn, "workers", wid, status="failed")
         state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
