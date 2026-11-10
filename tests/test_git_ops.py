@@ -23,7 +23,7 @@ def run_git(cwd, *args) -> str:
 
 class GitOpsTest(unittest.TestCase):
     def setUp(self):
-        self.base = Path(tempfile.mkdtemp(prefix="hive-gitops-"))
+        self.base = Path(tempfile.mkdtemp(prefix="hive-gitops-")).resolve()  # git reports resolved (/private/var...) paths
         self.repo = self.base / "repo"
         run_git(self.base, "init", "-b", "main", "repo")
         (self.repo / "a.txt").write_text("one\n")
