@@ -75,7 +75,7 @@ class GitOpsTest(unittest.TestCase):
         branch_delete(self.repo, "hive/feat/w1")
         self.assertFalse(branch_exists(self.repo, "hive/feat/w1"))
 
-    def test_merge_success_no_ff(self):
+    def test_merge_fast_forwards_when_possible(self):
         wt = self.worker_worktree()
         (wt / "b.txt").write_text("worker\n")
         run_git(wt, "add", "b.txt")
@@ -85,6 +85,26 @@ class GitOpsTest(unittest.TestCase):
         ok, out = merge_no_ff(self.repo, "hive/feat/w1", "merge w1")
         self.assertTrue(ok)
         self.assertEqual((self.repo / "b.txt").read_text(), "worker\n")
+        # Fast-forward: worker tip IS main, no merge commit created.
+        self.assertEqual(run_git(self.repo, "rev-parse", "main").strip(), worker_tip)
+        self.assertEqual(
+            run_git(self.repo, "log", "-1", "--format=%s", "main").strip(), "worker commit"
+        )
+
+    def test_merge_no_ff_when_diverged(self):
+        wt = self.worker_worktree()
+        (wt / "b.txt").write_text("worker\n")
+        run_git(wt, "add", "b.txt")
+        run_git(wt, "commit", "-m", "worker commit")
+        worker_tip = run_git(wt, "rev-parse", "HEAD").strip()
+        (self.repo / "c.txt").write_text("brain\n")
+        run_git(self.repo, "add", "c.txt")
+        run_git(self.repo, "commit", "-m", "brain commit")
+
+        ok, out = merge_no_ff(self.repo, "hive/feat/w1", "merge w1")
+        self.assertTrue(ok)
+        self.assertEqual((self.repo / "b.txt").read_text(), "worker\n")
+        self.assertEqual((self.repo / "c.txt").read_text(), "brain\n")
         self.assertEqual(run_git(self.repo, "rev-parse", "main^2").strip(), worker_tip)
         self.assertEqual(
             run_git(self.repo, "log", "-1", "--format=%s", "main").strip(), "merge w1"

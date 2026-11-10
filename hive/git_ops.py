@@ -126,11 +126,17 @@ def is_ancestor(repo, commit: str, of: str) -> bool:
 
 
 def merge_no_ff(worktree, branch: str, message: str) -> tuple[bool, str]:
-    """Merge `branch` into the worktree at `worktree` with a merge commit.
+    """Merge `branch` into the worktree at `worktree`; fast-forward when possible.
 
+    Worker branches are normally cut from the hive branch tip, so a fast-forward
+    keeps history linear: the worker's own commit lands and no merge commit is
+    created. When the branches diverged, fall back to --no-ff with a merge commit.
     On conflict the merge is aborted. The return is then (False, text) where
     text lists the conflicted files. On success the return is (True, stdout).
     """
+    r = _run(worktree, "merge", "--ff-only", branch, check=False)
+    if r.returncode == 0:
+        return True, r.stdout
     args = ["merge", "--no-ff", "-m", message, branch]
     r = _run(worktree, *args, check=False)
     if r.returncode == 0:

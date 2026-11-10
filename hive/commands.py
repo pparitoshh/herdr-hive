@@ -564,7 +564,7 @@ def cmd_merge(args):
                  "The brain tried to merge, but your worktree has uncommitted changes. Commit them and report again.",
                  worker=w["n"])
         raise SystemExit(f"hive: w{w['n']} has uncommitted changes; told the worker to commit")
-    ok, out = git.merge_no_ff(Path(hive["worktree"]), w["branch"], f"hive: merge w{w['n']} — {w['title']}")
+    ok, out = git.merge_no_ff(Path(hive["worktree"]), w["branch"], f"hive: merge w{w['n']} — {w['title'] or 'no title'}")
     if not ok:
         state.event(conn, hive["id"], "conflict", {"files": out}, w["id"])
         state.update(conn, "workers", w["id"], status="fixing")
