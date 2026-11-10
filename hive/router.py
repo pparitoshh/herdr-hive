@@ -54,10 +54,12 @@ starts the server in the background when the socket is missing.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -396,6 +398,9 @@ def tier_criteria(cfg) -> list[tuple[str, str]]:
 def sock_path() -> Path:
     p = state.STATE_DIR / "router.sock"
     p.parent.mkdir(parents=True, exist_ok=True)
+    if len(str(p)) > 100:  # AF_UNIX path limit is 104 bytes on macOS (108 on Linux)
+        digest = hashlib.sha256(str(p).encode()).hexdigest()[:12]
+        p = Path(tempfile.gettempdir()) / f"hive-router-{digest}.sock"
     return p
 
 

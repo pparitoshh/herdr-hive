@@ -87,6 +87,7 @@ def hive_by_name(conn, name):
 
 def hive_by_worktree(conn, path) -> sqlite3.Row | None:
     """The open hive whose hive worktree or one of whose worker worktrees contains path."""
+    p = str(Path(path).resolve())
     # Resolve both sides: stored paths may be pre-symlink (/tmp vs /private/tmp on macOS).
     def matches(stored):
         if not stored:
