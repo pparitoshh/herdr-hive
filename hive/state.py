@@ -87,12 +87,17 @@ def hive_by_name(conn, name):
 
 def hive_by_worktree(conn, path) -> sqlite3.Row | None:
     """The open hive whose hive worktree or one of whose worker worktrees contains path."""
-    p = str(Path(path).resolve())
+    # Resolve both sides: stored paths may be pre-symlink (/tmp vs /private/tmp on macOS).
+    def matches(stored):
+        if not stored:
+            return False
+        s = str(Path(stored).resolve())
+        return p == s or p.startswith(s + os.sep)
     for h in conn.execute("SELECT * FROM hives WHERE status='open'"):
-        if p == h["worktree"] or p.startswith(h["worktree"] + os.sep):
+        if matches(h["worktree"]):
             return h
     for w in conn.execute("SELECT * FROM workers"):
-        if w["worktree"] and (p == w["worktree"] or p.startswith(w["worktree"] + os.sep)):
+        if matches(w["worktree"]):
             h = conn.execute("SELECT * FROM hives WHERE id=? AND status='open'", (w["hive_id"],)).fetchone()
             if h:
                 return h
