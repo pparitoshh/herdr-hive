@@ -75,6 +75,21 @@ class CliTest(unittest.TestCase):
             rc, _, _ = self.cli("status")
         self.assertEqual(rc, 0)
 
+    def test_idle_worker_of_tier(self):
+        from hive.commands import _idle_worker_of_tier
+        hive = self.conn.execute("SELECT * FROM hives WHERE id=?", (self.hid,)).fetchone()
+        state.add_worker(self.conn, hive_id=self.hid, n=1, branch="b1", title="t",
+                         status="idle", tier="fast")
+        state.add_worker(self.conn, hive_id=self.hid, n=2, branch="b2", title="t",
+                         status="running", tier="fast")
+        state.add_worker(self.conn, hive_id=self.hid, n=3, branch="b3", title="t",
+                         status="idle", tier="think")
+        w = _idle_worker_of_tier(self.conn, hive, "fast")
+        self.assertEqual(w["n"], 1)
+        self.assertIsNone(_idle_worker_of_tier(self.conn, hive, "regular"))
+        self.conn.execute("UPDATE workers SET status='running' WHERE n=1")
+        self.assertIsNone(_idle_worker_of_tier(self.conn, hive, "fast"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS messages(
   created_at REAL, delivered_at REAL);
 """
 
-LIVE = ("spawning", "running", "reported", "fixing")
+LIVE = ("idle", "spawning", "running", "reported", "fixing")
 
 # Columns added after the first release. CREATE TABLE IF NOT EXISTS does not add
 # them to an existing table, so `connect` runs an ALTER TABLE migration.

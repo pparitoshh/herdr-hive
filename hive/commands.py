@@ -178,16 +178,20 @@ TRUST_DIALOG = re.compile(r"do you trust the files in this folder|trust this fol
 def worker_perm_argv(harness, worktree: str, hive_worktree: str) -> tuple[list[str], dict[str, str]]:
     """Per-launch permission grant for a worker: extra argv flags and env vars.
 
-    Claude reads a settings file under `<worktree>/.tmp` (`--settings`) plus
-    `--add-dir <hive worktree>`. OpenCode reads the OPENCODE_PERMISSION env
-    var. Only the hive bus commands and the hive worktree path are allowed;
-    nothing is written to a user-level config file.
+    Claude reads project settings `<worktree>/.claude/settings.local.json`
+    (NOT `--settings`: the harness command may pass its own, e.g.
+    claude-router inline auth) plus `--add-dir <hive worktree>`. OpenCode
+    reads the OPENCODE_PERMISSION env var. Only the hive bus commands and
+    the hive worktree path are allowed; nothing is written to a user-level
+    config file.
     """
     if harness.herdr_kind == "claude":
-        settings = Path(worktree) / ".tmp" / "hive-perms.json"
+        sdir = Path(worktree) / ".claude"
+        sdir.mkdir(parents=True, exist_ok=True)
+        settings = sdir / "settings.local.json"
         settings.write_text(json.dumps(config.claude_worker_settings()))
         os.chmod(settings, 0o600)
-        return config.claude_worker_perm_argv(settings, hive_worktree), {}
+        return config.claude_worker_perm_argv(hive_worktree), {}
     if harness.herdr_kind == "opencode":
         return [], config.opencode_worker_perm_env(hive_worktree)
     return [], {}
@@ -336,10 +340,25 @@ def _open_hive_body(conn, git, root, cfg, branch, name, workspace_for_popup, clo
     role = role_text("brain", hive=name, branch=branch, base=cfg.base_branch, worktree=wt, brain=brain,
                      max_workers=cfg.max_workers)
     launch_agent(brain_pane, brain, cfg.harness(hname), model, worker=False, role=role, workspace=ws)
+    hive_row = state.hive_by_workspace(conn, ws)
+    pre_spawn_errors = _pre_spawn_workers(conn, git, cfg, hive_row)
     open_bench(name, ws, wt)
     H.toast("Hive ready", f"{name}: brain is live ({hname}/{model})", sound="done")
     print(f"hive {name} open in {ws} (brain pane {brain_pane})")
+    for tier_name, err in pre_spawn_errors:
+        print(f"hive: pre-spawn {tier_name} worker failed: {err}", file=sys.stderr)
     return 0
+
+
+def _pre_spawn_workers(conn, git, cfg, hive_row):
+    """Start one idle worker per tier at hive open so tasks assign instantly."""
+    errors = []
+    for tier_name in cfg.tiers:
+        try:
+            _launch_worker(conn, git, cfg, hive_row, tier_name)
+        except (Exception, SystemExit) as e:
+            errors.append((tier_name, str(e)))
+    return errors
 
 
 def open_bench(name, ws, wt):
@@ -364,18 +383,60 @@ def cmd_new(args):
 
 # --- spawn / fix ---------------------------------------------------------------
 
+def _launch_worker(conn, git, cfg, hive, tier_name, task=None, title=None, route_json=None):
+    """Create a worker: row + worktree + branch + pane + agent. With a task,
+    send it and mark running; without one, leave the worker idle."""
+    brain = bus.brain_handle(hive["name"])
+    tier_cfg = cfg.tiers[tier_name]
+    hname, model = tier_cfg.harness, tier_cfg.model
+    n = state.next_worker_n(conn, hive["id"])
+    wb = worker_branch(hive["branch"], n)
+    wt = Path(hive["worktree"]).parent / f"{hive['name']}-w{n}"
+    live = state.workers(conn, hive["id"], live_only=True)
+    wid = state.add_worker(conn, hive_id=hive["id"], n=n, branch=wb, worktree=str(wt), harness=hname,
+                           model=model, title=title, task_ref=str(task) if task else None,
+                           status="spawning", tier=tier_name, route_json=route_json)
+    try:
+        git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
+        git.copy_worktreeinclude(Path(hive["repo"]), wt)
+        git.add_info_exclude(wt, ".tmp/")
+        target = live[-1]["pane_id"] if live else hive["brain_pane"]
+        direction = "down" if live else "right"
+        pane = H.split(target, direction, str(wt), env={"HIVE_NAME": hive["name"]})
+        state.update(conn, "workers", wid, pane_id=pane)
+        handle = bus.worker_handle(hive["name"], n)
+        role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
+                         branch=hive["branch"], handle=handle, brain=brain)
+        launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
+                     workspace=hive["workspace_id"], worktree=str(wt),
+                     hive_worktree=str(hive["worktree"]))
+    except (Exception, SystemExit) as e:
+        state.update(conn, "workers", wid, status="failed")
+        state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
+        raise
+    if task:
+        bus.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
+                 sender=brain, worker=n, task=str(wid), ref=str(task), kind="new", workspace=hive["workspace_id"])
+        state.update(conn, "workers", wid, status="running")
+    else:
+        state.update(conn, "workers", wid, status="idle")
+    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model,
+                                            "title": title, "tier": tier_name}, wid)
+    return wid, n, str(wt), wb, pane
+
+
+def _idle_worker_of_tier(conn, hive, tier):
+    for w in state.workers(conn, hive["id"], live_only=True):
+        if w["status"] == "idle" and w["tier"] == tier:
+            return w
+    return None
+
+
 def cmd_spawn(args):
     git = G()
     conn = state.connect()
     hive = _current_hive(conn)
     cfg = config.load(Path(hive["repo"]))
-    brain = bus.brain_handle(hive["name"])
-    live = state.workers(conn, hive["id"], live_only=True)
-    if len(live) >= cfg.max_workers:
-        msg = f"cap reached: {len(live)}/{cfg.max_workers} workers live. Merge or discard one first."
-        state.event(conn, hive["id"], "spawn_refused", {"reason": "cap"})
-        print(f"hive: {msg}", file=sys.stderr)
-        return 3
     task = Path(args.task_file).resolve()
     if not task.exists():
         raise SystemExit(f"hive: task file not found: {task}")
@@ -396,49 +457,39 @@ def cmd_spawn(args):
         state.event(conn, hive["id"], "spawn_declined", {"title": title, "reason": "tier cancelled"})
         print("hive: spawn declined by the human", file=sys.stderr)
         return 4
-    tier_cfg = cfg.tiers[route.tier]
-    hname, model = tier_cfg.harness, tier_cfg.model
-    n = state.next_worker_n(conn, hive["id"])
-    wb = worker_branch(hive["branch"], n)
-    wt = Path(hive["worktree"]).parent / f"{hive['name']}-w{n}"
     route_json = json.dumps({"probs": {t: round(float(p), 6) for t, p in route.probs.items()},
                              "confidence": round(route.confidence, 6),
                              "decided_by": route.decided_by})
-    wid = state.add_worker(conn, hive_id=hive["id"], n=n, branch=wb, worktree=str(wt), harness=hname,
-                           model=model, title=title, task_ref=str(task), status="spawning",
-                           tier=route.tier, route_json=route_json)
+    idle = _idle_worker_of_tier(conn, hive, route.tier)
+    if idle is not None:
+        bus.send(bus.worker_handle(hive["name"], idle["n"]), "task", hive["name"],
+                 f"New task: {title}. Read the task file in the ref, do it, commit, report.",
+                 sender=bus.brain_handle(hive["name"]), worker=idle["n"], task=str(idle["id"]),
+                 ref=str(task), kind="new", workspace=hive["workspace_id"])
+        state.update(conn, "workers", idle["id"], status="running", title=title, task_ref=str(task))
+        state.event(conn, hive["id"], "spawn", {"n": idle["n"], "harness": idle["harness"],
+                                                "model": idle["model"], "title": title,
+                                                "tier": route.tier, "reused": True}, idle["id"])
+        print(f"assigned task to idle w{idle['n']} tier={route.tier} ({idle['harness']}/{idle['model']})")
+        return 0
+    live = state.workers(conn, hive["id"], live_only=True)
+    if len(live) >= cfg.max_workers:
+        msg = f"cap reached: {len(live)}/{cfg.max_workers} workers live. Merge or discard one first."
+        state.event(conn, hive["id"], "spawn_refused", {"reason": "cap"})
+        print(f"hive: {msg}", file=sys.stderr)
+        return 3
     from . import routelog
+    wid, n, wt, wb, pane = _launch_worker(conn, git, cfg, hive, route.tier, task=task, title=title,
+                                          route_json=route_json)
+    w = state.worker(conn, hive["id"], n)
     routelog.log_case(hive, wid, title, task_text, router_request, route, cfg,
                       reason=_route_reason(route, human_reason, cfg),
                       state_features={"title": title, "file_count": file_count},
                       human_pick=route.tier if route.decided_by == "human" else None)
-    try:
-        git.worktree_add(Path(hive["repo"]), wt, wb, hive["branch"])
-        git.copy_worktreeinclude(Path(hive["repo"]), wt)
-        git.add_info_exclude(wt, ".tmp/")
-        target = live[-1]["pane_id"] if live else hive["brain_pane"]
-        direction = "down" if live else "right"
-        pane = H.split(target, direction, str(wt), env={"HIVE_NAME": hive["name"]})
-        state.update(conn, "workers", wid, pane_id=pane)
-        handle = bus.worker_handle(hive["name"], n)
-        role = role_text("worker", n=n, hive=hive["name"], worktree=wt, worker_branch=wb,
-                         branch=hive["branch"], handle=handle, brain=brain)
-        launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
-                     workspace=hive["workspace_id"], worktree=str(wt),
-                     hive_worktree=str(hive["worktree"]))
-    except Exception as e:
-        state.update(conn, "workers", wid, status="failed")
-        state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
-        raise
-    bus.send(handle, "task", hive["name"], f"New task: {title}. Read the task file in the ref, do it, commit, report.",
-           sender=brain, worker=n, task=str(wid), ref=str(task), kind="new", workspace=hive["workspace_id"])
-    state.update(conn, "workers", wid, status="running")
-    state.event(conn, hive["id"], "spawn", {"n": n, "harness": hname, "model": model, "title": title,
-                                            "tier": route.tier}, wid)
     state.event(conn, hive["id"], "route", {"tier": route.tier, "decided_by": route.decided_by,
                                             "confidence": round(route.confidence, 6),
                                             "probs": {t: round(float(p), 6) for t, p in route.probs.items()}}, wid)
-    print(f"spawned w{n} tier={route.tier} ({hname}/{model}) pane {pane} worktree {wt} branch {wb}")
+    print(f"spawned w{n} tier={route.tier} ({w['harness']}/{w['model']}) pane {pane} worktree {wt} branch {wb}")
     return 0
 
 
