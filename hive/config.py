@@ -124,10 +124,9 @@ def opencode_worker_perm_env(hive_worktree: str | Path) -> dict[str, str]:
     external_directory allows only the hive worktree; bash allows only the hive
     bus commands and falls back to ask for everything else."""
     perm = {
-        "permission": {
-            "external_directory": {f"{hive_worktree}/**": "allow"},
-            "bash": {**{f"{c}*": "allow" for c in HIVE_BUS_CMDS}, "*": "ask"},
-        },
+        # both depths: opencode glob `*` may not cross `/`, `**` may not exist
+        "external_directory": {f"{hive_worktree}/*": "allow", f"{hive_worktree}/**": "allow"},
+        "bash": {**{f"{c}*": "allow" for c in HIVE_BUS_CMDS}, "*": "ask"},
     }
     return {"OPENCODE_PERMISSION": json.dumps(perm)}
 

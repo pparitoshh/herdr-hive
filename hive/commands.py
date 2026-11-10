@@ -352,7 +352,7 @@ def _pre_spawn_workers(conn, git, cfg, hive_row):
     for tier_name in cfg.tiers:
         try:
             _launch_worker(conn, git, cfg, hive_row, tier_name)
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             errors.append((tier_name, str(e)))
     return errors
 
@@ -406,7 +406,7 @@ def _launch_worker(conn, git, cfg, hive, tier_name, task=None, title=None, route
         launch_agent(pane, handle, cfg.harness(hname), model, worker=True, role=role,
                      workspace=hive["workspace_id"], worktree=str(wt),
                      hive_worktree=str(hive["worktree"]))
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         state.update(conn, "workers", wid, status="failed")
         state.event(conn, hive["id"], "spawn_failed", {"error": str(e)}, wid)
         raise
