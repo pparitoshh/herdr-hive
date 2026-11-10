@@ -68,9 +68,8 @@ class ClaudePermsTest(BusFixup):
         self.assertEqual(argv[2:3], ["claude"])
         self.assertIn("--add-dir", argv)
         self.assertEqual(argv[argv.index("--add-dir") + 1], str(hive_wt))
-        self.assertIn("--settings", argv)
-        s = Path(argv[argv.index("--settings") + 1])
-        self.assertEqual(s.parent, wt / ".tmp")
+        self.assertNotIn("--settings", argv)  # a second --settings would override the harness auth
+        s = wt / ".claude" / "settings.local.json"
         self.assertTrue(s.is_file())
         perm = oct(s.stat().st_mode)[-3:]
         self.assertEqual(perm, "600")
@@ -78,7 +77,7 @@ class ClaudePermsTest(BusFixup):
     def test_settings_allow_only_hive_bus_commands(self):
         wt, hive_wt = _d() / "wt2", _d() / "hive2"
         argv = self._launch(worktree=str(wt), hive_worktree=str(hive_wt))
-        s = Path(argv[argv.index("--settings") + 1])
+        s = wt / ".claude" / "settings.local.json"
         allow = json.loads(s.read_text())["permissions"]["allow"]
         self.assertEqual(sorted(allow), sorted(ALLOWED))
 
@@ -88,6 +87,7 @@ class ClaudePermsTest(BusFixup):
         self.assertNotIn("--settings", argv)
         self.assertNotIn("--add-dir", argv)
         self.assertEqual(argv[:2], ["env", f"TMPDIR={wt / '.tmp'}"])
+        self.assertFalse((wt / ".claude" / "settings.local.json").exists())
 
 
 class OpencodePermsTest(BusFixup):
@@ -107,14 +107,15 @@ class OpencodePermsTest(BusFixup):
         self.assertEqual(env["TMPDIR"], str(wt / ".tmp"))
         self.assertIn("OPENCODE_PERMISSION", env)
         perm = json.loads(env["OPENCODE_PERMISSION"])
-        self.assertEqual(perm["permission"]["external_directory"],
-                         {f"{hive_wt}/**": "allow"})
-        bash = perm["permission"]["bash"]
+        self.assertEqual(perm["external_directory"],
+                         {f"{hive_wt}/*": "allow", f"{hive_wt}/**": "allow"})
+        bash = perm["bash"]
         self.assertEqual(bash["hive msg*"], "allow")
         self.assertEqual(bash["hive inbox*"], "allow")
         self.assertEqual(bash["hive show*"], "allow")
         # only the hive worktree path is allowed
-        self.assertEqual(list(perm["permission"]["external_directory"]), [f"{hive_wt}/**"])
+        self.assertEqual(sorted(perm["external_directory"]),
+                         sorted([f"{hive_wt}/*", f"{hive_wt}/**"]))
         # other bash commands stay unapproved
         self.assertEqual(bash["*"], "ask")
 

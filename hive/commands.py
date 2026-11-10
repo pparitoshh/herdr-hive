@@ -178,16 +178,20 @@ TRUST_DIALOG = re.compile(r"do you trust the files in this folder|trust this fol
 def worker_perm_argv(harness, worktree: str, hive_worktree: str) -> tuple[list[str], dict[str, str]]:
     """Per-launch permission grant for a worker: extra argv flags and env vars.
 
-    Claude reads a settings file under `<worktree>/.tmp` (`--settings`) plus
-    `--add-dir <hive worktree>`. OpenCode reads the OPENCODE_PERMISSION env
-    var. Only the hive bus commands and the hive worktree path are allowed;
-    nothing is written to a user-level config file.
+    Claude reads project settings `<worktree>/.claude/settings.local.json`
+    (NOT `--settings`: the harness command may pass its own, e.g.
+    claude-router inline auth) plus `--add-dir <hive worktree>`. OpenCode
+    reads the OPENCODE_PERMISSION env var. Only the hive bus commands and
+    the hive worktree path are allowed; nothing is written to a user-level
+    config file.
     """
     if harness.herdr_kind == "claude":
-        settings = Path(worktree) / ".tmp" / "hive-perms.json"
+        sdir = Path(worktree) / ".claude"
+        sdir.mkdir(parents=True, exist_ok=True)
+        settings = sdir / "settings.local.json"
         settings.write_text(json.dumps(config.claude_worker_settings()))
         os.chmod(settings, 0o600)
-        return config.claude_worker_perm_argv(settings, hive_worktree), {}
+        return config.claude_worker_perm_argv(hive_worktree), {}
     if harness.herdr_kind == "opencode":
         return [], config.opencode_worker_perm_env(hive_worktree)
     return [], {}

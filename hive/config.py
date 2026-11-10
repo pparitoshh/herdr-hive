@@ -113,9 +113,13 @@ def claude_worker_settings() -> dict:
     return {"permissions": {"allow": [f"Bash({c}:*)" for c in HIVE_BUS_CMDS]}}
 
 
-def claude_worker_perm_argv(settings_path: str | Path, hive_worktree: str | Path) -> list[str]:
-    """Extra claude flags for a worker: the settings file and the hive worktree."""
-    return ["--settings", str(settings_path), "--add-dir", str(hive_worktree)]
+def claude_worker_perm_argv(hive_worktree: str | Path) -> list[str]:
+    """Extra claude flags for a worker: the hive worktree.
+
+    Permissions go through the worktree project settings instead of
+    `--settings`: the harness command may already pass its own `--settings`
+    (e.g. claude-router inline auth) and a second flag would override it."""
+    return ["--add-dir", str(hive_worktree)]
 
 
 def opencode_worker_perm_env(hive_worktree: str | Path) -> dict[str, str]:
