@@ -605,6 +605,11 @@ def cmd_finish(args):
     conn = state.connect()
     hive = _current_hive(conn)
     live = state.workers(conn, hive["id"], live_only=True)
+    # idle workers hold no work: discard them instead of blocking finish
+    for w in [w for w in live if w["status"] == "idle"]:
+        remove_worker(conn, hive, w, "discarded", force_branch=True)
+        print(f"discarded idle w{w['n']}")
+    live = [w for w in live if w["status"] != "idle"]
     if live:
         names = ", ".join(f"w{w['n']} [{w['status']}]" for w in live)
         print(f"hive: finish refused; live workers: {names}. Merge or discard each one first.", file=sys.stderr)
